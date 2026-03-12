@@ -132,7 +132,7 @@ filters = {
 
 ## Design notes
 
-**Purpose-built, not general SQL.** The API surface is shaped around the access patterns of the generalized image service: point lookups, temporal/spatial range scans, bulk partition reads, and append-only writes. It is not a SQL abstraction.
+**Purpose-built, not general SQL.** The API surface is shaped around the access patterns of a scalable data / provenance store for observational data: point lookups, temporal/spatial range scans, bulk partition reads, and append-only writes. It is not a SQL abstraction.
 
 **Append-only writes.** There are no update or delete operations. `write(..., overwrite=True)` replaces an entire partition atomically, which is the supported pattern for re-running batch jobs.
 

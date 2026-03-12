@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amplify-db-utils"
+version = "0.1.0"
+description = "Columnar database abstraction layer for AMPLIfy image service workflows"
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb>=1.0",
+    "pyarrow>=14.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "pandas>=2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/amplify_db_utils"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

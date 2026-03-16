@@ -83,8 +83,96 @@ def test_to_arrow_schema_unsupported_type():
     class Bad(BaseModel):
         x: list  # not supported
 
-    with pytest.raises(TypeError, match="Unsupported"):
+    with pytest.raises(TypeError, match="Unsupported|Bare list"):
         to_arrow_schema(Bad)
+
+
+def test_to_arrow_schema_bare_list_suggests_typed():
+    class Bad(BaseModel):
+        x: list
+
+    with pytest.raises(TypeError, match="list\\["):
+        to_arrow_schema(Bad)
+
+
+# ---------------------------------------------------------------------------
+# list[T] support
+# ---------------------------------------------------------------------------
+
+
+class WithListStr(BaseModel):
+    tags: list[str]
+
+
+class WithListFloat(BaseModel):
+    scores: list[float]
+
+
+class WithListInt(BaseModel):
+    counts: list[int]
+
+
+class WithOptionalList(BaseModel):
+    image_id: str
+    embeddings: Optional[list[float]] = None
+
+
+def test_list_str_maps_to_arrow_list():
+    schema = to_arrow_schema(WithListStr)
+    assert schema.field("tags").type == pa.list_(pa.utf8())
+    assert not schema.field("tags").nullable
+
+
+def test_list_float_maps_to_arrow_list():
+    schema = to_arrow_schema(WithListFloat)
+    assert schema.field("scores").type == pa.list_(pa.float64())
+
+
+def test_list_int_maps_to_arrow_list():
+    schema = to_arrow_schema(WithListInt)
+    assert schema.field("counts").type == pa.list_(pa.int64())
+
+
+def test_optional_list_is_nullable():
+    schema = to_arrow_schema(WithOptionalList)
+    assert schema.field("embeddings").nullable
+    assert schema.field("embeddings").type == pa.list_(pa.float64())
+
+
+def test_list_unsupported_element_type():
+    class Bad(BaseModel):
+        x: list[dict]
+
+    with pytest.raises(TypeError, match="Unsupported list element type"):
+        to_arrow_schema(Bad)
+
+
+def test_validate_list_column_round_trip():
+    schema = to_arrow_schema(WithListFloat)
+    records = [
+        {"scores": [0.1, 0.2, 0.9]},
+        {"scores": [0.5]},
+    ]
+    table = validate_records(records, schema)
+    assert table.column("scores")[0].as_py() == [0.1, 0.2, 0.9]
+    assert table.column("scores")[1].as_py() == [0.5]
+
+
+def test_validate_empty_list():
+    schema = to_arrow_schema(WithListFloat)
+    records = [{"scores": []}]
+    table = validate_records(records, schema)
+    assert table.column("scores")[0].as_py() == []
+
+
+def test_validate_list_not_json_encoded():
+    """list[T] columns must NOT be serialized to JSON strings."""
+    schema = to_arrow_schema(WithListStr)
+    records = [{"tags": ["a", "b", "c"]}]
+    table = validate_records(records, schema)
+    val = table.column("tags")[0].as_py()
+    assert isinstance(val, list)
+    assert val == ["a", "b", "c"]
 
 
 def test_to_arrow_schema_not_a_model():

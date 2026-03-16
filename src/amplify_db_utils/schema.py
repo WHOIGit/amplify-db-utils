@@ -20,13 +20,39 @@ _PYTHON_TO_ARROW: dict[type, pa.DataType] = {
     dict: pa.large_utf8(),
 }
 
+# Scalar types allowed as list element types (dict excluded — list[dict] is not supported).
+_LIST_ELEM_TYPES: dict[type, pa.DataType] = {
+    k: v for k, v in _PYTHON_TO_ARROW.items() if k is not dict
+}
+
 
 def _annotation_to_arrow(annotation: Any) -> tuple[pa.DataType, bool]:
     """Convert a Python type annotation to ``(arrow_type, nullable)``.
 
     Handles ``Optional[T]`` (``Union[T, None]``) and the ``T | None`` pipe
     syntax (Python 3.10+). Returns ``nullable=True`` for Optional types.
+
+    Handles ``list[T]`` annotations, mapping them to ``pa.list_(arrow_type)``.
+    Supported element types are the same scalar types as the base mapping
+    (str, int, float, bool, datetime). Bare ``list`` without an element type
+    is not supported.
     """
+    origin = get_origin(annotation)
+
+    if origin is list:
+        args = get_args(annotation)
+        if not args:
+            raise TypeError(
+                "Bare list is not supported. Use list[str], list[int], list[float], etc."
+            )
+        elem_type = args[0]
+        if elem_type not in _LIST_ELEM_TYPES:
+            raise TypeError(
+                f"Unsupported list element type {elem_type!r}. "
+                f"Supported element types: {list(_LIST_ELEM_TYPES.keys())}"
+            )
+        return pa.list_(_LIST_ELEM_TYPES[elem_type]), False
+
     args = get_args(annotation)
 
     if args:
@@ -45,7 +71,8 @@ def _annotation_to_arrow(annotation: Any) -> tuple[pa.DataType, bool]:
 
     raise TypeError(
         f"Unsupported field type {annotation!r}. "
-        f"Supported types: {list(_PYTHON_TO_ARROW.keys())}"
+        f"Supported types: {list(_PYTHON_TO_ARROW.keys())}. "
+        f"For lists use list[str], list[int], list[float], etc."
     )
 
 

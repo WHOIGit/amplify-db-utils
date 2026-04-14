@@ -172,6 +172,14 @@ class DuckDBParquetStore(ColumnarStore):
         if changed:
             self._registry.save(self._fs, self._fs_root)
 
+    def get_schema(
+        self,
+        table: str,
+    ) -> pa.Schema:
+        """Return the registered schema for a table."""
+        schema, _ = self._registry.get(table)
+        return schema
+
     def write(
         self,
         table: str,

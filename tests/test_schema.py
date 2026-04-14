@@ -41,6 +41,24 @@ def test_to_arrow_schema_passthrough():
     assert to_arrow_schema(schema) is schema
 
 
+def test_get_schema(store):
+    schema = pa.schema(
+        [
+            pa.field("image_id", pa.utf8(), nullable=False),
+            pa.field("instrument", pa.utf8(), nullable=False),
+            pa.field("year", pa.int64(), nullable=False),
+            pa.field("month", pa.int64(), nullable=False),
+        ]
+    )
+    partition_by = ["instrument", "year", "month"]
+
+    store.create_table("images", schema, partition_by=partition_by)
+
+    found_schema = store.get_schema("images")
+
+    assert found_schema == schema
+
+
 def test_to_arrow_schema_str():
     schema = to_arrow_schema(AllTypes)
     assert schema.field("s").type == pa.utf8()

@@ -57,6 +57,23 @@ class ColumnarStore(ABC):
         """
 
     @abstractmethod
+    def get_table_info(
+        self,
+        table: str,
+    ) -> tuple[pa.Schema, list[str] | None]:
+        """Return the registered schema and partition_by for a table.
+
+        Args:
+            table: Table name.
+
+        Returns:
+            ``(schema, partition_by)`` for the registered table.
+
+        Raises:
+            KeyError: If the table has not been registered.
+        """
+
+    @abstractmethod
     def write(
         self,
         table: str,

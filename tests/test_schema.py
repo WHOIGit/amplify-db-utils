@@ -41,7 +41,7 @@ def test_to_arrow_schema_passthrough():
     assert to_arrow_schema(schema) is schema
 
 
-def test_get_table_info(store):
+def test_get_schema(store):
     schema = pa.schema(
         [
             pa.field("image_id", pa.utf8(), nullable=False),
@@ -54,10 +54,9 @@ def test_get_table_info(store):
 
     store.create_table("images", schema, partition_by=partition_by)
 
-    found_schema, found_partition_by = store.get_table_info("images")
+    found_schema = store.get_schema("images")
 
     assert found_schema == schema
-    assert found_partition_by == partition_by
 
 
 def test_to_arrow_schema_str():

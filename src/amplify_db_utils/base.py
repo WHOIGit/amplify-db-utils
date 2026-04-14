@@ -57,17 +57,17 @@ class ColumnarStore(ABC):
         """
 
     @abstractmethod
-    def get_table_info(
+    def get_schema(
         self,
         table: str,
-    ) -> tuple[pa.Schema, list[str] | None]:
-        """Return the registered schema and partition_by for a table.
+    ) -> pa.Schema:
+        """Return the registered schema for a table.
 
         Args:
             table: Table name.
 
         Returns:
-            ``(schema, partition_by)`` for the registered table.
+            Registered schema for the table.
 
         Raises:
             KeyError: If the table has not been registered.

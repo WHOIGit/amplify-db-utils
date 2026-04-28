@@ -57,6 +57,23 @@ class ColumnarStore(ABC):
         """
 
     @abstractmethod
+    def get_schema(
+        self,
+        table: str,
+    ) -> pa.Schema:
+        """Return the registered schema for a table.
+
+        Args:
+            table: Table name.
+
+        Returns:
+            Registered schema for the table.
+
+        Raises:
+            KeyError: If the table has not been registered.
+        """
+
+    @abstractmethod
     def write(
         self,
         table: str,

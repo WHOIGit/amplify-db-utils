@@ -1,7 +1,5 @@
 """VAST DB implementation of ColumnarStore.
 
-Requires: vastdb (pip install vastdb)
-
 This backend targets the VastDB columnar store. Key differences from
 DuckDB+Parquet:
   - Append-only (WORM): no in-place overwrite or delete.
@@ -83,6 +81,10 @@ def _normalize_for_vastdb(schema: pa.Schema) -> pa.Schema:
             t = f.type
             if pa.types.is_timestamp(t) and t.tz is not None:
                 t = pa.timestamp(t.unit)
+            elif pa.types.is_large_string(t):
+                t = pa.string()
+            elif pa.types.is_large_binary(t):
+                t = pa.binary()
             fields.append(pa.field(f.name, t, nullable=True))
         return pa.schema(fields)
 # ---------------------------------------------------------------------------
@@ -145,7 +147,23 @@ class VastDBStore(ColumnarStore):
     # ------------------------------------------------------------------
     # Internal: resolve bucket/schema handles inside an open transaction
     # ------------------------------------------------------------------
+    def get_schema(self, table: str) -> pa.Schema:
+        """Return the registered schema for a table.
 
+        Args:
+            table: Table name.
+
+        Returns:
+            Registered schema for the table.
+
+        Raises:
+            KeyError: If the table has not been registered.
+        """
+        if table not in self._table_meta:
+            raise KeyError(table)
+        schema, _ = self._table_meta[table]
+        return schema
+    
     def _schema_handle(self, tx):
         """Return the VastDB schema handle (bucket.schema) inside a tx.
 

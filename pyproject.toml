@@ -14,7 +14,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-pandas = ["pandas>=2.0"]
+pandas = [
+    "pandas>=2.0",
+    "vastdb"
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",

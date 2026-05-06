@@ -365,13 +365,23 @@ class VastDBStore(ColumnarStore):
     # count
     # ------------------------------------------------------------------
 
-    def count(
-        self,
-        table: str,
-        filters: Filters | None = None,
-    ) -> int:
-        arrow_table = self.bulk_read(table, filters)
-        return len(arrow_table)
+    def count(self, table: str, filters: Filters | None = None) -> int:
+        with self._session.transaction() as tx:
+            vast_table = self._schema_handle(tx).table(table)
+
+            if not filters:
+                # Server-side metadata; no scan, no data transfer.
+                return vast_table.stats.num_rows
+
+            # Filtered count: must scan, but minimize work by projecting one
+            # column and streaming row counts instead of materializing.
+            predicate = _filters_to_predicate(filters)
+            any_col = vast_table.columns().names[0]
+            reader = vast_table.select(columns=[any_col], predicate=predicate)
+            total = 0
+            for batch in reader:
+                total += batch.num_rows
+            return total
 
     # ------------------------------------------------------------------
     # join

@@ -10,7 +10,6 @@ Public API:
 from amplify_db_utils.base import ColumnarStore, Filters
 from amplify_db_utils.config import DuckDBParquetConfig
 from amplify_db_utils.duckdb_parquet import DuckDBParquetStore
-from amplify_db_utils.vastdb_store import VastDBConfig, VastDBStore, dedup_by_written_at
 
 __all__ = [
     "ColumnarStore",

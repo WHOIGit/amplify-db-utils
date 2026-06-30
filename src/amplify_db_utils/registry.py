@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 
 import pyarrow as pa
 import pyarrow.fs as pa_fs
+
+
+def _schema_to_ipc_b64(schema: pa.Schema) -> str:
+    """Serialize a full schema to a base64 Arrow-IPC string.
+
+    Round-trips losslessly for every Arrow type — including nested types like
+    ``list``, ``large_list``, ``struct``, and ``map`` — plus field nullability
+    and metadata, with no hand-maintained type table to drift behind PyArrow.
+    """
+    return base64.b64encode(schema.serialize().to_pybytes()).decode("ascii")
+
+
+def _schema_from_ipc_b64(s: str) -> pa.Schema:
+    """Deserialize a schema from its base64 Arrow-IPC representation."""
+    return pa.ipc.read_schema(pa.py_buffer(base64.b64decode(s)))
 
 
 def _arrow_type_to_str(t: pa.DataType) -> str:
@@ -15,7 +31,12 @@ def _arrow_type_to_str(t: pa.DataType) -> str:
 
 
 def _arrow_type_from_str(s: str) -> pa.DataType:
-    """Deserialize a PyArrow type from its string representation."""
+    """Deserialize a PyArrow type from its string representation.
+
+    Covers scalar + timestamp types. This is the legacy ``schema_fields``
+    reader, kept for backwards compatibility with registries without/written-before
+    ``schema_ipc``. New registries are read back via :func:`_schema_from_ipc_b64`.
+    """
     simple: dict[str, pa.DataType] = {
         "string": pa.utf8(),
         "utf8": pa.utf8(),
@@ -51,6 +72,12 @@ def _arrow_type_from_str(s: str) -> pa.DataType:
 
 
 def _schema_to_json(schema: pa.Schema) -> list[dict]:
+    """Render a schema as a human-readable list of fields.
+
+    Stored alongside the authoritative IPC blob so the registry file stays
+    legible. It is also the back-compat read path: :func:`_schema_from_json`
+    parses it when ``schema_ipc`` is absent (registries written before IPC).
+    """
     return [
         {"name": f.name, "type": _arrow_type_to_str(f.type), "nullable": f.nullable}
         for f in schema
@@ -58,6 +85,7 @@ def _schema_to_json(schema: pa.Schema) -> list[dict]:
 
 
 def _schema_from_json(fields: list[dict]) -> pa.Schema:
+    """Reconstruct a schema from the legacy ``schema_fields`` form."""
     return pa.schema([
         pa.field(f["name"], _arrow_type_from_str(f["type"]), nullable=f["nullable"])
         for f in fields
@@ -87,8 +115,14 @@ class SchemaRegistry:
             with fs.open_input_stream(registry_path) as f:
                 data = json.loads(f.read().decode("utf-8"))
             for table_name, entry in data.items():
+                # Prefer the lossless IPC representation; fall back to the
+                # per-field form for registries written before IPC was added.
+                if entry.get("schema_ipc"):
+                    schema = _schema_from_ipc_b64(entry["schema_ipc"])
+                else:
+                    schema = _schema_from_json(entry["schema_fields"])
                 registry._tables[table_name] = {
-                    "schema": _schema_from_json(entry["schema_fields"]),
+                    "schema": schema,
                     "partition_by": entry.get("partition_by"),
                 }
         except (FileNotFoundError, pa.ArrowIOError, KeyError):
@@ -100,6 +134,10 @@ class SchemaRegistry:
         data = {}
         for table_name, entry in self._tables.items():
             data[table_name] = {
+                # schema_ipc is authoritative on load; schema_fields is kept
+                # alongside it as a human-readable view for inspection and
+                # backwards compatibility.
+                "schema_ipc": _schema_to_ipc_b64(entry["schema"]),
                 "schema_fields": _schema_to_json(entry["schema"]),
                 "partition_by": entry["partition_by"],
             }

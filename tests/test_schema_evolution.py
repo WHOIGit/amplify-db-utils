@@ -267,16 +267,16 @@ def test_registry_roundtrips_nested_types(tmp_path):
     assert got == schema
 
 
-def test_registry_loads_legacy_schema_fields_only(tmp_path):
-    """Registries written before schema_ipc (schema_fields only) still load.
+def test_registry_rejects_legacy_schema_fields_only(tmp_path):
+    """Legacy registries (schema_fields, no schema_ipc) no longer load.
 
-    Back-compat: stores created by older versions wrote a scalar-only
-    schema_fields form with no IPC blob; those live sidecars must keep loading.
+    IPC is now the only authoritative representation; a legacy sidecar must be
+    upgraded via ``amplify-db-migrate`` before it will load.
     """
     import json
 
-    import pyarrow as pa
     import pyarrow.fs as pa_fs
+    import pytest
 
     from amplify_db_utils.registry import SchemaRegistry
 
@@ -294,10 +294,5 @@ def test_registry_loads_legacy_schema_fields_only(tmp_path):
     }))
 
     fs = pa_fs.LocalFileSystem()
-    loaded = SchemaRegistry.load(fs, str(tmp_path))
-
-    got, partition_by = loaded.get("t")
-    assert got.field("id").type == pa.utf8()
-    assert got.field("year").type == pa.int64()
-    assert got.field("ts").type == pa.timestamp("us", tz="UTC")
-    assert partition_by == ["year"]
+    with pytest.raises(ValueError, match="amplify-db-migrate"):
+        SchemaRegistry.load(fs, str(tmp_path))

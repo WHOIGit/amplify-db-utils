@@ -19,6 +19,7 @@ dev = [
     "pytest>=7.0",
     "pytest-cov",
     "pandas>=2.0",
+    "pytz",
 ]
 
 [tool.hatch.build.targets.wheel]

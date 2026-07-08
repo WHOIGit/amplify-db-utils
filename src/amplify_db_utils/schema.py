@@ -155,8 +155,10 @@ def validate_records(
         table = records
     elif isinstance(records, list):
         processed = _preprocess_list_records(records, schema)
+        present_names = {key for record in records for key in record}
+        build_schema = pa.schema([f for f in schema if f.name in present_names])
         try:
-            table = pa.Table.from_pylist(processed)
+            table = pa.Table.from_pylist(processed, schema=build_schema)
         except Exception as e:
             raise ValueError(f"Failed to convert records to Arrow table: {e}") from e
     else:

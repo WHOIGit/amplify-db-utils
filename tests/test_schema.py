@@ -251,6 +251,36 @@ def test_validate_pyarrow_table_input():
     assert len(result) == 2
 
 
+def test_validate_records_preserves_list_values_when_first_row_missing_list_column():
+    schema = pa.schema(
+        [
+            pa.field("id", pa.string(), nullable=False),
+            pa.field("vec", pa.list_(pa.float32()), nullable=True),
+        ]
+    )
+    records = [
+        {"id": "a"},
+        {"id": "b", "vec": [1.0, 2.0]},
+    ]
+    table = validate_records(records, schema)
+    assert table.column("vec").to_pylist() == [None, [1.0, 2.0]]
+
+
+def test_validate_records_preserves_list_values_when_first_row_has_list_column():
+    schema = pa.schema(
+        [
+            pa.field("id", pa.string(), nullable=False),
+            pa.field("vec", pa.list_(pa.float32()), nullable=True),
+        ]
+    )
+    records = [
+        {"id": "b", "vec": [1.0, 2.0]},
+        {"id": "a"},
+    ]
+    table = validate_records(records, schema)
+    assert table.column("vec").to_pylist() == [[1.0, 2.0], None]
+
+
 def test_validate_dict_serialized_to_json():
     class WithData(BaseModel):
         image_id: str

@@ -128,6 +128,25 @@ filters = {
 }
 ```
 
+### Migrating a legacy registry
+
+The schema registry (`_registry/tables.json`) stores each table's schema as a
+base64 Arrow-IPC blob under a `schema_ipc` key. Registries written by older
+versions instead used a `schema_fields` list of `{name, type, nullable}` dicts,
+which is no longer read on load — such a store fails to open with a `ValueError`
+pointing you here.
+
+Upgrade the sidecar in place with the bundled console script:
+
+```bash
+amplify-db-migrate path/to/store/_registry/tables.json
+```
+
+It rewrites each legacy entry to carry `schema_ipc` plus a human-readable
+`columns` list, leaving `partition_by` untouched. The command is idempotent —
+re-running it on an already-migrated file is a no-op — so it is safe to run
+defensively before opening a store of unknown age.
+
 ---
 
 ## Design notes
@@ -141,4 +160,3 @@ filters = {
 **Schema registry.** Per-table schema and `partition_by` metadata are persisted as `_registry/tables.json` at the store root, readable and writable via PyArrow's filesystem abstraction (local or S3).
 
 **Backend independence.** `ColumnarStore` is an abstract base class. The DuckDB+Parquet backend is intended for local development, laptops, and single-process workflows. A VAST DB backend can be added as a drop-in for production-scale concurrent access without changes to the consuming service.
-

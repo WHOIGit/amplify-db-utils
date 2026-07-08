@@ -51,6 +51,15 @@ class ImageRecordChangeType(BaseModel):
     month: int
 
 
+class ImageRecordWithEmbedding(BaseModel):
+    """V1 + a nullable list[float] column (e.g. an embedding vector)."""
+    image_id: str
+    instrument: str
+    year: int
+    month: int
+    embedding: Optional[list[float]] = None
+
+
 # ---------------------------------------------------------------------------
 # Idempotency
 # ---------------------------------------------------------------------------
@@ -155,3 +164,135 @@ def test_registry_prevents_breaking_change_after_reload(tmp_path):
     store2 = DuckDBParquetStore(config)
     with pytest.raises(ValueError):
         store2.create_table("t", ImageRecordRemoveColumn, partition_by=["instrument", "year", "month"])
+
+
+# ---------------------------------------------------------------------------
+# list[T] columns across the full db lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_list_column_persists_across_instances(tmp_path):
+    """A list[T] column survives create → write → reopen → read.
+
+    Regression: before the registry round-trip fix, opening a fresh store on a
+    directory whose registry held a ``list<…>`` type crashed in
+    ``SchemaRegistry.load()`` with "Cannot deserialize PyArrow type".
+    """
+    from amplify_db_utils import DuckDBParquetConfig, DuckDBParquetStore
+
+    config = DuckDBParquetConfig(root=str(tmp_path))
+
+    store1 = DuckDBParquetStore(config)
+    store1.create_table("t", ImageRecordWithEmbedding, partition_by=["instrument", "year", "month"])
+    store1.write("t", [{
+        "image_id": "a",
+        "instrument": "IFCB107",
+        "year": 2024,
+        "month": 1,
+        "embedding": [0.1, 0.2, 0.3],
+    }])
+
+    # Fresh instance on the same root must load the list type without crashing.
+    store2 = DuckDBParquetStore(config)
+    assert store2.count("t") == 1
+    rows = list(store2.read("t", filters={"instrument": "IFCB107", "year": 2024, "month": 1}))
+    assert len(rows) == 1
+    assert rows[0]["embedding"] == [0.1, 0.2, 0.3]
+
+
+def test_list_column_idempotent_after_reload(tmp_path):
+    """Re-registering a list[T] schema after reload from disk is a no-op."""
+    from amplify_db_utils import DuckDBParquetConfig, DuckDBParquetStore
+
+    config = DuckDBParquetConfig(root=str(tmp_path))
+
+    store1 = DuckDBParquetStore(config)
+    store1.create_table("t", ImageRecordWithEmbedding, partition_by=["instrument", "year", "month"])
+
+    store2 = DuckDBParquetStore(config)
+    # Round-tripped schema must compare equal, so this should not raise.
+    store2.create_table("t", ImageRecordWithEmbedding, partition_by=["instrument", "year", "month"])
+
+
+# ---------------------------------------------------------------------------
+# SchemaRegistry serialization round-trip (unit level)
+# ---------------------------------------------------------------------------
+
+
+def test_registry_roundtrips_list_type(tmp_path):
+    import pyarrow as pa
+    import pyarrow.fs as pa_fs
+
+    from amplify_db_utils.registry import SchemaRegistry
+
+    schema = pa.schema([
+        pa.field("id", pa.string(), nullable=False),
+        pa.field("vec", pa.list_(pa.float32()), nullable=True),
+    ])
+
+    registry = SchemaRegistry()
+    registry.register("t", schema, partition_by=None)
+
+    fs = pa_fs.LocalFileSystem()
+    registry.save(fs, str(tmp_path))
+    loaded = SchemaRegistry.load(fs, str(tmp_path))
+
+    got, _ = loaded.get("t")
+    assert got == schema
+    assert got.field("vec").type == pa.list_(pa.float32())
+
+
+def test_registry_roundtrips_nested_types(tmp_path):
+    import pyarrow as pa
+    import pyarrow.fs as pa_fs
+
+    from amplify_db_utils.registry import SchemaRegistry
+
+    schema = pa.schema([
+        pa.field("tags", pa.large_list(pa.utf8()), nullable=True),
+        pa.field("meta", pa.struct([
+            pa.field("x", pa.int32()),
+            pa.field("y", pa.utf8()),
+        ]), nullable=True),
+    ])
+
+    registry = SchemaRegistry()
+    registry.register("t", schema, partition_by=None)
+
+    fs = pa_fs.LocalFileSystem()
+    registry.save(fs, str(tmp_path))
+    loaded = SchemaRegistry.load(fs, str(tmp_path))
+
+    got, _ = loaded.get("t")
+    assert got == schema
+
+
+def test_registry_rejects_legacy_schema_fields_only(tmp_path):
+    """Legacy registries (schema_fields, no schema_ipc) no longer load.
+
+    IPC is now the only authoritative representation; a legacy sidecar must be
+    upgraded via ``amplify-db-migrate`` before it will load.
+    """
+    import json
+
+    import pyarrow.fs as pa_fs
+    import pytest
+
+    from amplify_db_utils.registry import SchemaRegistry
+
+    registry_dir = tmp_path / "_registry"
+    registry_dir.mkdir()
+    (registry_dir / "tables.json").write_text(json.dumps({
+        "t": {
+            "schema_fields": [
+                {"name": "id", "type": "string", "nullable": False},
+                {"name": "year", "type": "int64", "nullable": False},
+                {"name": "ts", "type": "timestamp[us, tz=UTC]", "nullable": True},
+            ],
+            "partition_by": ["year"],
+        }
+    }))
+
+    fs = pa_fs.LocalFileSystem()
+    with pytest.raises(ValueError, match="amplify-db-migrate"):
+        SchemaRegistry.load(fs, str(tmp_path))

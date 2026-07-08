@@ -17,3 +17,11 @@ __all__ = [
     "DuckDBParquetConfig",
     "DuckDBParquetStore",
 ]
+
+# Optional VAST DB backend; only available when the `vastdb` extra is installed.
+try:
+    from amplify_db_utils.vastdb_store import VastDBConfig, VastDBStore
+except ImportError:
+    pass
+else:
+    __all__ += ["VastDBConfig", "VastDBStore"]

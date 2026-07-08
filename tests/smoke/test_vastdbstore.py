@@ -7,8 +7,13 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
-from amplify_db_utils import VastDBConfig, VastDBStore
-from amplify_db_utils.vastdb_store import dedup_by_written_at
+pytest.importorskip("vastdb", reason="vastdb optional dependency not installed")
+
+from amplify_db_utils.vastdb_store import (
+    VastDBConfig,
+    VastDBStore,
+    dedup_by_written_at,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("VASTDB_ENDPOINT"),

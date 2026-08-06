@@ -99,10 +99,10 @@ class VastDBConfig:
     bound to one (bucket, schema) pair.
 
     Args:
-        endpoint: VastDB endpoint URL, e.g. "https://vast.whoi.edu".
+        endpoint: VastDB endpoint URL, e.g. "https://vast.example.org".
         access_key: S3-compatible access key for VastDB auth.
         secret_key: S3-compatible secret key for VastDB auth.
-        bucket: VastDB bucket name, e.g. "scieng-db1".
+        bucket: VastDB bucket name, e.g. "somevastdbbucket".
         schema: VastDB schema name, e.g. "schema1".
         add_written_at: If True, automatically add a `written_at` timestamp
             column to every table and stamp it on every write. Opt-in because

@@ -60,8 +60,14 @@ class DuckDBParquetStore(ColumnarStore):
     DuckDB runs in-process with an in-memory catalog — the data lives in
     Parquet files, not in a DuckDB file.
 
-    Not suitable for concurrent multi-process writes (e.g., SLURM parallel
-    jobs). Use VAST DB for production-scale concurrent access.
+    Reads are safe to run concurrently from multiple threads: each query gets
+    its own DuckDB cursor.
+
+    Not suitable for concurrent writes, whether from multiple threads or
+    multiple processes (e.g., SLURM parallel jobs) — the schema registry is
+    read-modify-written without locking, and overwrite deletes partition
+    directories out from under in-flight readers. Use VAST DB for
+    production-scale concurrent access.
 
     Args:
         config: Store configuration.
@@ -74,22 +80,43 @@ class DuckDBParquetStore(ColumnarStore):
         # In-process DuckDB — data is in Parquet, not in this connection
         self._conn = duckdb.connect(":memory:")
 
+        # Settings that are LOCAL-scope in DuckDB apply per connection, so they
+        # must be replayed on every cursor handed out by _cursor(). GLOBAL-scope
+        # settings and loaded extensions are shared by all cursors.
+        self._local_settings: list[str] = []
+
         if config.threads is not None:
-            self._conn.execute(f"SET threads = {int(config.threads)}")
+            self._conn.execute(f"SET threads = {int(config.threads)}")  # GLOBAL
 
         if config.root.startswith("s3://"):
             self._conn.execute("INSTALL httpfs")
             self._conn.execute("LOAD httpfs")
-            if config.s3_endpoint:
-                self._conn.execute(f"SET s3_endpoint = '{config.s3_endpoint}'")
-            if config.s3_access_key:
+            if config.s3_access_key:  # GLOBAL
                 self._conn.execute(f"SET s3_access_key = '{config.s3_access_key}'")
-            if config.s3_secret_key:
+            if config.s3_secret_key:  # GLOBAL
                 self._conn.execute(f"SET s3_secret_key = '{config.s3_secret_key}'")
-            if not config.s3_use_ssl:
-                self._conn.execute("SET s3_use_ssl = false")
+            if config.s3_endpoint:  # LOCAL
+                self._local_settings.append(f"SET s3_endpoint = '{config.s3_endpoint}'")
+            if not config.s3_use_ssl:  # LOCAL
+                self._local_settings.append("SET s3_use_ssl = false")
+            for stmt in self._local_settings:
+                self._conn.execute(stmt)
 
         self._registry = SchemaRegistry.load(self._fs, self._fs_root)
+
+    def _cursor(self) -> duckdb.DuckDBPyConnection:
+        """Return a fresh cursor with LOCAL-scope settings applied.
+
+        Every query needs its own cursor. A DuckDB connection holds exactly one
+        pending result, so running a second query on it discards the first
+        one's remaining rows — silently, which corrupts the lazy generators
+        returned by read() and join() whenever two of them are interleaved or
+        run from different threads.
+        """
+        cursor = self._conn.cursor()
+        for stmt in self._local_settings:
+            cursor.execute(stmt)
+        return cursor
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -278,8 +305,9 @@ class DuckDBParquetStore(ColumnarStore):
         params: list = []
         where = filters_to_sql(filters, params)
         sql = f"SELECT * FROM read_parquet('{glob}', hive_partitioning=True) WHERE {where}"
+        cursor = self._cursor()
         try:
-            cursor = self._conn.execute(sql, params)
+            cursor.execute(sql, params)
             cols = [d[0] for d in cursor.description]
             while True:
                 batch = cursor.fetchmany(1000)
@@ -289,6 +317,8 @@ class DuckDBParquetStore(ColumnarStore):
                     yield dict(zip(cols, row))
         except duckdb.IOException:
             return  # No Parquet files found — table is empty
+        finally:
+            cursor.close()
 
     def bulk_read(
         self,
@@ -299,8 +329,9 @@ class DuckDBParquetStore(ColumnarStore):
         params: list = []
         where = filters_to_sql(filters, params)
         sql = f"SELECT * FROM read_parquet('{glob}', hive_partitioning=True) WHERE {where}"
+        cursor = self._cursor()
         try:
-            result = self._conn.execute(sql, params).arrow()
+            result = cursor.execute(sql, params).arrow()
             # In DuckDB >= 1.1, .arrow() may return a RecordBatchReader
             if not isinstance(result, pa.Table):
                 result = result.read_all()
@@ -309,6 +340,8 @@ class DuckDBParquetStore(ColumnarStore):
             # No Parquet files — return empty table with registered schema
             schema, _ = self._registry.get(table)
             return schema.empty_table()
+        finally:
+            cursor.close()
 
     def distinct_values(
         self,
@@ -336,11 +369,14 @@ class DuckDBParquetStore(ColumnarStore):
             f"FROM read_parquet('{glob}', hive_partitioning=True) "
             f"WHERE {where}"
         )
+        cursor = self._cursor()
         try:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = cursor.execute(sql, params).fetchall()
             return [dict(zip(fields, row)) for row in rows]
         except duckdb.IOException:
             return []
+        finally:
+            cursor.close()
 
     def _distinct_values_from_hive(
         self,
@@ -394,11 +430,14 @@ class DuckDBParquetStore(ColumnarStore):
         params: list = []
         where = filters_to_sql(filters, params)
         sql = f"SELECT COUNT(*) FROM read_parquet('{glob}', hive_partitioning=True) WHERE {where}"
+        cursor = self._cursor()
         try:
-            result = self._conn.execute(sql, params).fetchone()
+            result = cursor.execute(sql, params).fetchone()
             return result[0] if result else 0
         except duckdb.IOException:
             return 0
+        finally:
+            cursor.close()
 
     def join(
         self,
@@ -438,8 +477,9 @@ class DuckDBParquetStore(ColumnarStore):
             FROM l
             JOIN r ON l."{on}" = r."{on}"
         """
+        cursor = self._cursor()
         try:
-            cursor = self._conn.execute(sql, params)
+            cursor.execute(sql, params)
             cols = [d[0] for d in cursor.description]
             while True:
                 batch = cursor.fetchmany(1000)
@@ -449,3 +489,5 @@ class DuckDBParquetStore(ColumnarStore):
                     yield dict(zip(cols, row))
         except duckdb.IOException:
             return  # One or both tables are empty
+        finally:
+            cursor.close()

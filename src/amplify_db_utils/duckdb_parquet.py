@@ -308,11 +308,16 @@ class DuckDBParquetStore(ColumnarStore):
         reach the query text — a name that is not a registered column never
         gets interpolated. Identifiers cannot be bound as query parameters, so
         the validated names are double-quoted in the SQL.
+
+        An un-projected read never touches the registry: the registry snapshot
+        is loaded once in ``__init__``, and reads of a table registered by
+        another process afterwards must keep working (``_parquet_glob``
+        likewise falls back to the wide glob on a registry miss).
         """
-        schema, _ = self._registry.get(table)
-        columns = validate_projection(columns, schema)
         if columns is None:
             return "*", None
+        schema, _ = self._registry.get(table)
+        columns = validate_projection(columns, schema)
         return ", ".join(f'"{c}"' for c in columns), columns
 
     def read(

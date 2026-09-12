@@ -440,11 +440,25 @@ class VastDBStore(ColumnarStore):
     ) -> list[dict]:
         """Distinct values via client-side DuckDB on an Arrow stream.
 
-        Note: this is the expensive path — VastDB has no server-side
+        Only ``fields`` are read from VastDB — without that projection a
+        partition-discovery call on a table holding an embedding or blob column
+        would transfer and materialize the whole table.
+
+        Note: this is still the expensive path — VastDB has no server-side
         SELECT DISTINCT. For partition discovery on large tables, consider
         maintaining a separate lightweight index table.
+
+        Raises:
+            ValueError: If ``fields`` is empty or names a column the table does
+                not have.
         """
-        arrow_table = self.bulk_read(table, filters)
+        if not fields:
+            raise ValueError("fields must name at least one column.")
+
+        # Projection rejects duplicates; SELECT DISTINCT does not care, so
+        # dedupe for the read and leave the caller's field list untouched.
+        projection = list(dict.fromkeys(fields))
+        arrow_table = self.bulk_read(table, filters, columns=projection)
 
         conn = duckdb.connect(":memory:")
         field_list = ", ".join(f'"{f}"' for f in fields)

@@ -375,3 +375,26 @@ def test_read_reserved_word_column_name(store):
     )
     rows = list(store.read("weird", columns=["select"]))
     assert rows == [{"select": 7}]
+
+
+def test_unprojected_read_tolerates_stale_registry_snapshot(tmp_path):
+    """An un-projected read must not require the table in this store's registry.
+
+    SchemaRegistry.load happens once in __init__, so a store constructed before
+    another process registers a table holds a stale snapshot. That read worked
+    before column projection existed and must keep working.
+    """
+    from amplify_db_utils import DuckDBParquetConfig, DuckDBParquetStore
+
+    config = DuckDBParquetConfig(root=str(tmp_path))
+    writer = DuckDBParquetStore(config)
+    reader = DuckDBParquetStore(config)  # snapshot taken before 'images' exists
+
+    _setup_images(writer)
+
+    assert len(reader.bulk_read("images")) == 4
+    assert len(list(reader.read("images"))) == 4
+
+    # A projection still needs the schema, so it surfaces the registry miss.
+    with pytest.raises(KeyError):
+        reader.bulk_read("images", columns=["image_id"])

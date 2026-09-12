@@ -165,3 +165,37 @@ def test_vastdb_projection_read_only_consumer(store):
 
     with pytest.raises(ValueError, match="no_such_column"):
         reader.bulk_read("ro", columns=["no_such_column"])
+
+
+def test_vastdb_distinct_values_projects(store):
+    """distinct_values must read only the requested fields, not the whole table."""
+    schema = pa.schema([
+        pa.field("image_id", pa.string(), nullable=True),
+        pa.field("instrument", pa.string(), nullable=True),
+        pa.field("score", pa.float64(), nullable=True),
+    ])
+    store.create_table("dv", schema)
+    store.write("dv", [
+        {"image_id": "a", "instrument": "IFCB1", "score": 0.1},
+        {"image_id": "b", "instrument": "IFCB1", "score": 0.2},
+        {"image_id": "c", "instrument": "IFCB2", "score": 0.3},
+    ])
+
+    seen = []
+    original = store.bulk_read
+
+    def spy(table, filters=None, columns=None):
+        seen.append(columns)
+        return original(table, filters, columns)
+
+    store.bulk_read = spy
+    try:
+        results = store.distinct_values("dv", ["instrument"])
+    finally:
+        store.bulk_read = original
+
+    assert seen == [["instrument"]]
+    assert sorted(r["instrument"] for r in results) == ["IFCB1", "IFCB2"]
+
+    with pytest.raises(ValueError, match="at least one column"):
+        store.distinct_values("dv", [])

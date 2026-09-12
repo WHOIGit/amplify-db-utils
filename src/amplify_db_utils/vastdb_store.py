@@ -29,6 +29,7 @@ from amplify_db_utils.base import ColumnarStore, Filters
 from amplify_db_utils.schema import (
     check_partition_fields,
     to_arrow_schema,
+    validate_projection,
     validate_records,
 )
 
@@ -143,6 +144,8 @@ class VastDBStore(ColumnarStore):
         )
         # Cache: table_name -> (pa.Schema, partition_by)
         self._table_meta: dict[str, tuple[pa.Schema, list[str] | None]] = {}
+        # Cache: table_name -> schema as the server actually holds it.
+        self._server_schema_cache: dict[str, pa.Schema] = {}
 
     # ------------------------------------------------------------------
     # Internal: resolve bucket/schema handles inside an open transaction
@@ -163,7 +166,30 @@ class VastDBStore(ColumnarStore):
             raise KeyError(table)
         schema, _ = self._table_meta[table]
         return schema
-    
+
+    def _server_schema(self, table: str) -> pa.Schema:
+        """Return the table's schema as the server holds it, cached per table.
+
+        Projection is validated against this rather than against the schema
+        cached by ``create_table()``: a read-only consumer never calls
+        ``create_table()``, and a cached requested schema is permitted to be a
+        subset of the real table (``_check_schema_compat`` allows the existing
+        table to carry extra columns, e.g. ``written_at``).
+
+        Raises:
+            KeyError: If the table does not exist on the server.
+        """
+        cached = self._server_schema_cache.get(table)
+        if cached is not None:
+            return cached
+        with self._session.transaction() as tx:
+            vast_schema = self._schema_handle(tx)
+            if table not in {t.name for t in vast_schema.tables()}:
+                raise KeyError(table)
+            schema = vast_schema.table(table).columns()
+        self._server_schema_cache[table] = schema
+        return schema
+
     def _schema_handle(self, tx):
         """Return the VastDB schema handle (bucket.schema) inside a tx.
 
@@ -222,8 +248,10 @@ class VastDBStore(ColumnarStore):
                     table, existing_arrow, arrow_schema, partition_by
                 )
                 # TODO: ALTER TABLE ADD COLUMN for new nullable columns
+                self._server_schema_cache[table] = existing_arrow
             else:
                 vast_schema.create_table(table, arrow_schema)
+                self._server_schema_cache[table] = arrow_schema
 
         self._table_meta[table] = (arrow_schema, partition_by)
 
@@ -313,8 +341,43 @@ class VastDBStore(ColumnarStore):
         self,
         table: str,
         filters: Filters | None = None,
+        columns: list[str] | None = None,
     ) -> Iterator[dict]:
-        arrow_table = self.bulk_read(table, filters)
+        """Filtered row iteration.
+
+        Args:
+            table: Table name.
+            filters: Optional filter dict.
+            columns: Optional projection. Each yielded dict has exactly these
+                keys, in the order listed. Unprojected columns are never read
+                from VAST DB. Filter columns need not be projected; partition
+                key columns are ordinary columns here and are projectable.
+                ``None`` (default) yields every column.
+
+        Yields:
+            Row dicts.
+
+        Raises:
+            ValueError: If ``columns`` is empty, contains duplicates, or names
+                a column the table does not have. Raised before reading rows.
+            KeyError: If ``columns`` is given and the table does not exist.
+        """
+        # Validate eagerly: read() is a generator factory, so projection errors
+        # must surface at call time rather than on first iteration. Skip the
+        # schema lookup entirely when nothing was projected, so an un-projected
+        # read needs no registered or server schema.
+        if columns is not None:
+            validate_projection(columns, self._server_schema(table))
+        return self._read_rows(table, filters, columns)
+
+    def _read_rows(
+        self,
+        table: str,
+        filters: Filters | None,
+        columns: list[str] | None,
+    ) -> Iterator[dict]:
+        """Generator behind ``read`` — assumes the projection is validated."""
+        arrow_table = self.bulk_read(table, filters, columns)
         for batch in arrow_table.to_batches():
             rows = batch.to_pydict()
             n = batch.num_rows
@@ -326,12 +389,43 @@ class VastDBStore(ColumnarStore):
     # bulk_read
     # ------------------------------------------------------------------
 
-    def bulk_read(self, table, filters=None) -> pa.Table:
+    def bulk_read(
+        self,
+        table: str,
+        filters: Filters | None = None,
+        columns: list[str] | None = None,
+    ) -> pa.Table:
+        """Read rows matching filters as a PyArrow Table.
+
+        Args:
+            table: Table name.
+            filters: Optional filter dict, pushed down as a VAST DB predicate.
+            columns: Optional projection, pushed down to VAST DB so unprojected
+                columns are never transferred. The returned table contains
+                exactly these columns, in the order listed (caller order, not
+                registered-schema order). Filter columns need not be projected;
+                partition key columns are ordinary columns here and are
+                projectable. ``None`` (default) returns every column.
+
+        Returns:
+            PyArrow ``Table`` containing matching rows.
+
+        Raises:
+            ValueError: If ``columns`` is empty, contains duplicates, or names
+                a column the table does not have. Raised before reading rows.
+            KeyError: If ``columns`` is given and the table does not exist.
+        """
+        if columns is not None:
+            columns = validate_projection(columns, self._server_schema(table))
         with self._session.transaction() as tx:
             vast_table = self._schema_handle(tx).table(table)
             predicate = _filters_to_predicate(filters)  # no table arg
-            reader = vast_table.select(predicate=predicate)
+            reader = vast_table.select(columns=columns, predicate=predicate)
             result = reader.read_all()
+        if columns is not None and result.schema.names != columns:
+            # VastDB may return server-side column order; the API contract is
+            # caller order.
+            result = result.select(columns)
         return result
 
     # ------------------------------------------------------------------
@@ -346,11 +440,25 @@ class VastDBStore(ColumnarStore):
     ) -> list[dict]:
         """Distinct values via client-side DuckDB on an Arrow stream.
 
-        Note: this is the expensive path — VastDB has no server-side
+        Only ``fields`` are read from VastDB — without that projection a
+        partition-discovery call on a table holding an embedding or blob column
+        would transfer and materialize the whole table.
+
+        Note: this is still the expensive path — VastDB has no server-side
         SELECT DISTINCT. For partition discovery on large tables, consider
         maintaining a separate lightweight index table.
+
+        Raises:
+            ValueError: If ``fields`` is empty or names a column the table does
+                not have.
         """
-        arrow_table = self.bulk_read(table, filters)
+        if not fields:
+            raise ValueError("fields must name at least one column.")
+
+        # Projection rejects duplicates; SELECT DISTINCT does not care, so
+        # dedupe for the read and leave the caller's field list untouched.
+        projection = list(dict.fromkeys(fields))
+        arrow_table = self.bulk_read(table, filters, columns=projection)
 
         conn = duckdb.connect(":memory:")
         field_list = ", ".join(f'"{f}"' for f in fields)
@@ -443,6 +551,7 @@ class VastDBStore(ColumnarStore):
             if table in existing:
                 vast_schema.table(table).drop()
         self._table_meta.pop(table, None)
+        self._server_schema_cache.pop(table, None)
 
     def drop_schema(self) -> None:
         """Drop all tables in this store's schema, then the schema itself.
@@ -455,12 +564,14 @@ class VastDBStore(ColumnarStore):
             existing_schemas = {s.name for s in bucket.schemas()}
             if self._config.schema not in existing_schemas:
                 self._table_meta.clear()
+                self._server_schema_cache.clear()
                 return
             vast_schema = bucket.schema(self._config.schema)
             for t in list(vast_schema.tables()):
                 t.drop()
             vast_schema.drop()
         self._table_meta.clear()
+        self._server_schema_cache.clear()
 
 
 # ---------------------------------------------------------------------------

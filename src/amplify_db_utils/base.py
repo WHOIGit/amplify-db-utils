@@ -103,6 +103,7 @@ class ColumnarStore(ABC):
         self,
         table: str,
         filters: Filters | None = None,
+        columns: list[str] | None = None,
     ) -> Iterator[dict]:
         """Filtered row iteration.
 
@@ -111,9 +112,20 @@ class ColumnarStore(ABC):
             filters: Optional filter dict. See ``Filters`` type for syntax.
                 Supports equality, range (gte/gt/lte/lt), and set membership (in).
                 Include partition key fields for efficient partition pruning.
+            columns: Optional projection. When given, each yielded dict has
+                exactly these keys, in the order listed. Both backends are
+                columnar, so unprojected columns are never read — use this to
+                skip wide columns (embeddings, blobs, long text). Filter
+                columns need not be projected. Partition key columns are
+                projectable. ``None`` (default) returns every column.
 
         Yields:
             Row dicts.
+
+        Raises:
+            ValueError: If ``columns`` is empty, contains duplicates, or names
+                a column that is not in the registered schema. Validation
+                happens before any IO.
         """
 
     @abstractmethod
@@ -121,6 +133,7 @@ class ColumnarStore(ABC):
         self,
         table: str,
         filters: Filters | None = None,
+        columns: list[str] | None = None,
     ) -> pa.Table:
         """Read rows matching filters as a PyArrow Table.
 
@@ -131,9 +144,23 @@ class ColumnarStore(ABC):
             table: Table name.
             filters: Optional filter dict. Provide partition key fields
                 to ensure efficient execution.
+            columns: Optional projection. When given, the returned table
+                contains exactly these columns, in the order listed (caller
+                order, not registered-schema order). Both backends are
+                columnar, so unprojected columns are never read — use this to
+                skip wide columns (embeddings, blobs, long text). Filter
+                columns need not be projected. Partition key columns are
+                projectable. ``None`` (default) returns every column.
 
         Returns:
-            PyArrow ``Table`` containing matching rows.
+            PyArrow ``Table`` containing matching rows. If the table holds no
+            data yet, an empty table whose schema is the projection (or the
+            full registered schema when ``columns is None``).
+
+        Raises:
+            ValueError: If ``columns`` is empty, contains duplicates, or names
+                a column that is not in the registered schema. Validation
+                happens before any IO.
         """
 
     @abstractmethod

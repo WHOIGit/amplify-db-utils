@@ -15,7 +15,12 @@ from amplify_db_utils.base import ColumnarStore, Filters
 from amplify_db_utils.config import DuckDBParquetConfig
 from amplify_db_utils.filters import filters_to_sql
 from amplify_db_utils.registry import SchemaRegistry
-from amplify_db_utils.schema import check_partition_fields, to_arrow_schema, validate_records
+from amplify_db_utils.schema import (
+    check_partition_fields,
+    to_arrow_schema,
+    validate_projection,
+    validate_records,
+)
 
 
 def _init_filesystem(config: DuckDBParquetConfig) -> tuple[pa_fs.FileSystem, str]:
@@ -296,15 +301,67 @@ class DuckDBParquetStore(ColumnarStore):
         # Append the new records (directories were cleared above)
         self._append_records(table, arrow_table, partition_by)
 
+    def _select_list(self, table: str, columns: list[str] | None) -> tuple[str, list[str] | None]:
+        """Return ``(select_list_sql, validated_columns)`` for a projection.
+
+        Column names are validated against the registered schema before they
+        reach the query text — a name that is not a registered column never
+        gets interpolated. Identifiers cannot be bound as query parameters, so
+        the validated names are double-quoted in the SQL.
+
+        An un-projected read never touches the registry: the registry snapshot
+        is loaded once in ``__init__``, and reads of a table registered by
+        another process afterwards must keep working (``_parquet_glob``
+        likewise falls back to the wide glob on a registry miss).
+        """
+        if columns is None:
+            return "*", None
+        schema, _ = self._registry.get(table)
+        columns = validate_projection(columns, schema)
+        return ", ".join(f'"{c}"' for c in columns), columns
+
     def read(
         self,
         table: str,
         filters: Filters | None = None,
+        columns: list[str] | None = None,
     ) -> Iterator[dict]:
+        """Filtered row iteration.
+
+        Args:
+            table: Table name.
+            filters: Optional filter dict.
+            columns: Optional projection. Each yielded dict has exactly these
+                keys, in the order listed. Filter columns need not be
+                projected; Hive partition key columns are projectable.
+                ``None`` (default) yields every column.
+
+        Yields:
+            Row dicts.
+
+        Raises:
+            ValueError: If ``columns`` is empty, contains duplicates, or names
+                an unregistered column. Raised before any IO.
+        """
+        # Validate eagerly: read() is a generator factory, so projection errors
+        # must surface at call time rather than on first iteration.
+        select_list, _ = self._select_list(table, columns)
+        return self._read_rows(table, filters, select_list)
+
+    def _read_rows(
+        self,
+        table: str,
+        filters: Filters | None,
+        select_list: str,
+    ) -> Iterator[dict]:
+        """Generator behind ``read`` — assumes the projection is validated."""
         glob = self._parquet_glob(table, filters)
         params: list = []
         where = filters_to_sql(filters, params)
-        sql = f"SELECT * FROM read_parquet('{glob}', hive_partitioning=True) WHERE {where}"
+        sql = (
+            f"SELECT {select_list} "
+            f"FROM read_parquet('{glob}', hive_partitioning=True) WHERE {where}"
+        )
         cursor = self._cursor()
         try:
             cursor.execute(sql, params)
@@ -324,11 +381,36 @@ class DuckDBParquetStore(ColumnarStore):
         self,
         table: str,
         filters: Filters | None = None,
+        columns: list[str] | None = None,
     ) -> pa.Table:
+        """Read rows matching filters as a PyArrow Table.
+
+        Args:
+            table: Table name.
+            filters: Optional filter dict.
+            columns: Optional projection. The returned table contains exactly
+                these columns, in the order listed (caller order, not
+                registered-schema order). Unprojected columns are never read
+                from the Parquet files. Filter columns need not be projected;
+                Hive partition key columns are projectable. ``None`` (default)
+                returns every column.
+
+        Returns:
+            PyArrow ``Table``. When no Parquet files exist yet, an empty table
+            whose schema is the projection, with registered field types.
+
+        Raises:
+            ValueError: If ``columns`` is empty, contains duplicates, or names
+                an unregistered column. Raised before any IO.
+        """
+        select_list, projected = self._select_list(table, columns)
         glob = self._parquet_glob(table, filters)
         params: list = []
         where = filters_to_sql(filters, params)
-        sql = f"SELECT * FROM read_parquet('{glob}', hive_partitioning=True) WHERE {where}"
+        sql = (
+            f"SELECT {select_list} "
+            f"FROM read_parquet('{glob}', hive_partitioning=True) WHERE {where}"
+        )
         cursor = self._cursor()
         try:
             result = cursor.execute(sql, params).arrow()
@@ -337,8 +419,12 @@ class DuckDBParquetStore(ColumnarStore):
                 result = result.read_all()
             return result
         except duckdb.IOException:
-            # No Parquet files — return empty table with registered schema
+            # No Parquet files — return empty table with registered schema,
+            # narrowed to the projection so callers can concatenate results
+            # without hitting a schema mismatch.
             schema, _ = self._registry.get(table)
+            if projected is not None:
+                schema = pa.schema([schema.field(c) for c in projected])
             return schema.empty_table()
         finally:
             cursor.close()

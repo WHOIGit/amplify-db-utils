@@ -84,3 +84,55 @@ def test_vastdb_smoke(store):
     assert len(deduped) == 3
     a_row = deduped.filter(pc.equal(deduped["image_id"], "a")).to_pylist()[0]
     assert a_row["score"] == 0.99
+
+
+def test_vastdb_projection(store):
+    schema = pa.schema([
+        pa.field("image_id", pa.string(), nullable=True),
+        pa.field("instrument", pa.string(), nullable=True),
+        pa.field("timestamp", pa.timestamp("us"), nullable=True),
+        pa.field("score", pa.float64(), nullable=True),
+    ])
+    store.create_table("proj", schema, partition_by=["instrument"])
+
+    now = datetime.now(timezone.utc)
+    store.write("proj", [
+        {"image_id": "a", "instrument": "IFCB1", "timestamp": now, "score": 0.1},
+        {"image_id": "b", "instrument": "IFCB1", "timestamp": now, "score": 0.2},
+        {"image_id": "c", "instrument": "IFCB2", "timestamp": now, "score": 0.3},
+    ])
+
+    # 1. projection returns exactly the requested columns, in caller order
+    tbl = store.bulk_read("proj", columns=["score", "image_id"])
+    assert tbl.schema.names == ["score", "image_id"]
+    assert len(tbl) == 3
+
+    # 2. columns=None is unchanged
+    full = store.bulk_read("proj")
+    assert set(full.schema.names) == set(schema.names) | {"written_at"}
+
+    # 3. filter on a column that is not projected
+    filtered = store.bulk_read(
+        "proj", filters={"instrument": "IFCB1"}, columns=["image_id"]
+    )
+    assert filtered.schema.names == ["image_id"]
+    assert sorted(filtered.column("image_id").to_pylist()) == ["a", "b"]
+
+    # 4. partition key columns are projectable
+    parts = store.bulk_read("proj", columns=["instrument"])
+    assert parts.schema.names == ["instrument"]
+    assert sorted(parts.column("instrument").to_pylist()) == ["IFCB1", "IFCB1", "IFCB2"]
+
+    # 5. read() yields dicts with exactly the projected keys
+    rows = list(store.read("proj", filters={"instrument": "IFCB2"}, columns=["image_id"]))
+    assert rows == [{"image_id": "c"}]
+
+    # 6. validation errors, raised before any IO
+    with pytest.raises(ValueError, match="no_such_column"):
+        store.bulk_read("proj", columns=["no_such_column"])
+    with pytest.raises(ValueError, match="ambiguous"):
+        store.bulk_read("proj", columns=[])
+    with pytest.raises(ValueError, match="[Dd]uplicate"):
+        store.bulk_read("proj", columns=["image_id", "image_id"])
+    with pytest.raises(ValueError, match="no_such_column"):
+        store.read("proj", columns=["no_such_column"])

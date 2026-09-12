@@ -232,3 +232,56 @@ def check_partition_fields(table: pa.Table, partition_by: list[str]) -> None:
                 f"Partition key field '{field}' contains {null_count} null value(s). "
                 f"Null values in partition keys produce malformed Hive paths."
             )
+
+
+def validate_projection(columns: list[str] | None, schema: pa.Schema) -> list[str] | None:
+    """Validate a caller-supplied column projection against a registered schema.
+
+    Args:
+        columns: Requested column names, or None for "all columns".
+        schema: Registered schema for the table.
+
+    Returns:
+        The requested column names unchanged, or None.
+
+    Raises:
+        ValueError: If ``columns`` is an empty list, contains duplicate names,
+            or names any column that is not in the registered schema.
+    """
+    if columns is None:
+        return None
+
+    if not isinstance(columns, (list, tuple)):
+        raise ValueError(
+            f"columns must be a list of column names or None, got {type(columns).__name__}"
+        )
+
+    columns = list(columns)
+
+    if not columns:
+        raise ValueError(
+            "columns=[] is ambiguous. Pass columns=None to read every column, "
+            "or name at least one column."
+        )
+
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for name in columns:
+        if name in seen and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        raise ValueError(
+            f"Duplicate column name(s) in columns: {duplicates!r}. "
+            f"Each column may be requested at most once."
+        )
+
+    valid = set(schema.names)
+    unknown = [name for name in columns if name not in valid]
+    if unknown:
+        raise ValueError(
+            f"Unknown column(s) {unknown!r}. "
+            f"Valid columns are: {sorted(valid)!r}"
+        )
+
+    return columns

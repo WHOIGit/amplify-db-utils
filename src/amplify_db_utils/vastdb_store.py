@@ -29,6 +29,7 @@ from amplify_db_utils.base import ColumnarStore, Filters
 from amplify_db_utils.schema import (
     check_partition_fields,
     to_arrow_schema,
+    validate_projection,
     validate_records,
 )
 
@@ -313,8 +314,39 @@ class VastDBStore(ColumnarStore):
         self,
         table: str,
         filters: Filters | None = None,
+        columns: list[str] | None = None,
     ) -> Iterator[dict]:
-        arrow_table = self.bulk_read(table, filters)
+        """Filtered row iteration.
+
+        Args:
+            table: Table name.
+            filters: Optional filter dict.
+            columns: Optional projection. Each yielded dict has exactly these
+                keys, in the order listed. Unprojected columns are never read
+                from VAST DB. Filter columns need not be projected; partition
+                key columns are ordinary columns here and are projectable.
+                ``None`` (default) yields every column.
+
+        Yields:
+            Row dicts.
+
+        Raises:
+            ValueError: If ``columns`` is empty, contains duplicates, or names
+                an unregistered column. Raised before any IO.
+        """
+        # Validate eagerly: read() is a generator factory, so projection errors
+        # must surface at call time rather than on first iteration.
+        validate_projection(columns, self.get_schema(table))
+        return self._read_rows(table, filters, columns)
+
+    def _read_rows(
+        self,
+        table: str,
+        filters: Filters | None,
+        columns: list[str] | None,
+    ) -> Iterator[dict]:
+        """Generator behind ``read`` — assumes the projection is validated."""
+        arrow_table = self.bulk_read(table, filters, columns)
         for batch in arrow_table.to_batches():
             rows = batch.to_pydict()
             n = batch.num_rows
@@ -326,12 +358,41 @@ class VastDBStore(ColumnarStore):
     # bulk_read
     # ------------------------------------------------------------------
 
-    def bulk_read(self, table, filters=None) -> pa.Table:
+    def bulk_read(
+        self,
+        table: str,
+        filters: Filters | None = None,
+        columns: list[str] | None = None,
+    ) -> pa.Table:
+        """Read rows matching filters as a PyArrow Table.
+
+        Args:
+            table: Table name.
+            filters: Optional filter dict, pushed down as a VAST DB predicate.
+            columns: Optional projection, pushed down to VAST DB so unprojected
+                columns are never transferred. The returned table contains
+                exactly these columns, in the order listed (caller order, not
+                registered-schema order). Filter columns need not be projected;
+                partition key columns are ordinary columns here and are
+                projectable. ``None`` (default) returns every column.
+
+        Returns:
+            PyArrow ``Table`` containing matching rows.
+
+        Raises:
+            ValueError: If ``columns`` is empty, contains duplicates, or names
+                an unregistered column. Raised before any IO.
+        """
+        columns = validate_projection(columns, self.get_schema(table))
         with self._session.transaction() as tx:
             vast_table = self._schema_handle(tx).table(table)
             predicate = _filters_to_predicate(filters)  # no table arg
-            reader = vast_table.select(predicate=predicate)
+            reader = vast_table.select(columns=columns, predicate=predicate)
             result = reader.read_all()
+        if columns is not None and result.schema.names != columns:
+            # VastDB may return server-side column order; the API contract is
+            # caller order.
+            result = result.select(columns)
         return result
 
     # ------------------------------------------------------------------

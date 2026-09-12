@@ -144,6 +144,8 @@ class VastDBStore(ColumnarStore):
         )
         # Cache: table_name -> (pa.Schema, partition_by)
         self._table_meta: dict[str, tuple[pa.Schema, list[str] | None]] = {}
+        # Cache: table_name -> schema as the server actually holds it.
+        self._server_schema_cache: dict[str, pa.Schema] = {}
 
     # ------------------------------------------------------------------
     # Internal: resolve bucket/schema handles inside an open transaction
@@ -164,7 +166,30 @@ class VastDBStore(ColumnarStore):
             raise KeyError(table)
         schema, _ = self._table_meta[table]
         return schema
-    
+
+    def _server_schema(self, table: str) -> pa.Schema:
+        """Return the table's schema as the server holds it, cached per table.
+
+        Projection is validated against this rather than against the schema
+        cached by ``create_table()``: a read-only consumer never calls
+        ``create_table()``, and a cached requested schema is permitted to be a
+        subset of the real table (``_check_schema_compat`` allows the existing
+        table to carry extra columns, e.g. ``written_at``).
+
+        Raises:
+            KeyError: If the table does not exist on the server.
+        """
+        cached = self._server_schema_cache.get(table)
+        if cached is not None:
+            return cached
+        with self._session.transaction() as tx:
+            vast_schema = self._schema_handle(tx)
+            if table not in {t.name for t in vast_schema.tables()}:
+                raise KeyError(table)
+            schema = vast_schema.table(table).columns()
+        self._server_schema_cache[table] = schema
+        return schema
+
     def _schema_handle(self, tx):
         """Return the VastDB schema handle (bucket.schema) inside a tx.
 
@@ -223,8 +248,10 @@ class VastDBStore(ColumnarStore):
                     table, existing_arrow, arrow_schema, partition_by
                 )
                 # TODO: ALTER TABLE ADD COLUMN for new nullable columns
+                self._server_schema_cache[table] = existing_arrow
             else:
                 vast_schema.create_table(table, arrow_schema)
+                self._server_schema_cache[table] = arrow_schema
 
         self._table_meta[table] = (arrow_schema, partition_by)
 
@@ -332,11 +359,15 @@ class VastDBStore(ColumnarStore):
 
         Raises:
             ValueError: If ``columns`` is empty, contains duplicates, or names
-                an unregistered column. Raised before any IO.
+                a column the table does not have. Raised before reading rows.
+            KeyError: If ``columns`` is given and the table does not exist.
         """
         # Validate eagerly: read() is a generator factory, so projection errors
-        # must surface at call time rather than on first iteration.
-        validate_projection(columns, self.get_schema(table))
+        # must surface at call time rather than on first iteration. Skip the
+        # schema lookup entirely when nothing was projected, so an un-projected
+        # read needs no registered or server schema.
+        if columns is not None:
+            validate_projection(columns, self._server_schema(table))
         return self._read_rows(table, filters, columns)
 
     def _read_rows(
@@ -381,9 +412,11 @@ class VastDBStore(ColumnarStore):
 
         Raises:
             ValueError: If ``columns`` is empty, contains duplicates, or names
-                an unregistered column. Raised before any IO.
+                a column the table does not have. Raised before reading rows.
+            KeyError: If ``columns`` is given and the table does not exist.
         """
-        columns = validate_projection(columns, self.get_schema(table))
+        if columns is not None:
+            columns = validate_projection(columns, self._server_schema(table))
         with self._session.transaction() as tx:
             vast_table = self._schema_handle(tx).table(table)
             predicate = _filters_to_predicate(filters)  # no table arg
@@ -504,6 +537,7 @@ class VastDBStore(ColumnarStore):
             if table in existing:
                 vast_schema.table(table).drop()
         self._table_meta.pop(table, None)
+        self._server_schema_cache.pop(table, None)
 
     def drop_schema(self) -> None:
         """Drop all tables in this store's schema, then the schema itself.
@@ -516,12 +550,14 @@ class VastDBStore(ColumnarStore):
             existing_schemas = {s.name for s in bucket.schemas()}
             if self._config.schema not in existing_schemas:
                 self._table_meta.clear()
+                self._server_schema_cache.clear()
                 return
             vast_schema = bucket.schema(self._config.schema)
             for t in list(vast_schema.tables()):
                 t.drop()
             vast_schema.drop()
         self._table_meta.clear()
+        self._server_schema_cache.clear()
 
 
 # ---------------------------------------------------------------------------

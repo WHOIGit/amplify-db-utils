@@ -136,3 +136,32 @@ def test_vastdb_projection(store):
         store.bulk_read("proj", columns=["image_id", "image_id"])
     with pytest.raises(ValueError, match="no_such_column"):
         store.read("proj", columns=["no_such_column"])
+
+    # 7. columns injected by the store (written_at) are projectable even though
+    #    they are not in the caller's declared schema
+    stamped = store.bulk_read("proj", columns=["written_at", "image_id"])
+    assert stamped.schema.names == ["written_at", "image_id"]
+
+
+def test_vastdb_projection_read_only_consumer(store):
+    """A consumer that never calls create_table() can still read and project."""
+    schema = pa.schema([
+        pa.field("image_id", pa.string(), nullable=True),
+        pa.field("score", pa.float64(), nullable=True),
+    ])
+    store.create_table("ro", schema)
+    store.write("ro", [{"image_id": "a", "score": 0.1}])
+
+    # Fresh store over the same bucket/schema, with an empty metadata cache —
+    # this is what a read-only consumer looks like.
+    reader = VastDBStore(store._config)
+
+    full = reader.bulk_read("ro")
+    assert len(full) == 1
+
+    projected = reader.bulk_read("ro", columns=["score"])
+    assert projected.schema.names == ["score"]
+    assert list(reader.read("ro", columns=["image_id"])) == [{"image_id": "a"}]
+
+    with pytest.raises(ValueError, match="no_such_column"):
+        reader.bulk_read("ro", columns=["no_such_column"])

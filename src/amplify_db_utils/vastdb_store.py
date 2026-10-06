@@ -184,12 +184,15 @@ class VastDBStore(ColumnarStore):
     # create_table
     # ------------------------------------------------------------------
 
-    def create_table(
+    def _prepare_schema(
         self,
-        table: str,
         schema: type[BaseModel] | pa.Schema,
-        partition_by: list[str] | None = None,
-    ) -> None:
+        partition_by: list[str] | None,
+    ) -> pa.Schema:
+        """Normalize a declared schema to what VastDB will actually store.
+
+        Pure — no network, no mutation of instance state.
+        """
         arrow_schema = to_arrow_schema(schema)
         arrow_schema = _normalize_for_vastdb(arrow_schema)
 
@@ -208,8 +211,37 @@ class VastDBStore(ColumnarStore):
                     f"Partition key field(s) {missing!r} not in schema."
                 )
 
-        # Idempotent: check existence first, don't rely on exception type
-        # (broad except Exception was masking auth/connection errors).
+        return arrow_schema
+
+    def register_table(
+        self,
+        table: str,
+        schema: type[BaseModel] | pa.Schema,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        # Local bookkeeping only. _table_meta is per-instance and in-memory —
+        # it is not persisted anywhere and not reconstructible from VastDB,
+        # since partition_by is not a VastDB concept. Every process that reads
+        # or writes must therefore declare its tables, but declaring is free
+        # and cannot race.
+        self._table_meta[table] = (
+            self._prepare_schema(schema, partition_by),
+            partition_by,
+        )
+
+    def create_table(
+        self,
+        table: str,
+        schema: type[BaseModel] | pa.Schema,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        arrow_schema = self._prepare_schema(schema, partition_by)
+
+        # Check-then-create, and VastDB has no atomic create-if-absent: the
+        # SDK's own fail_if_exists is a client-side list() before an
+        # unconditional create RPC, so the flag never reaches the server.
+        # Concurrent callers can both see an absent table and both create it.
+        # Single-process callers only — see register_table for the rest.
         with self._session.transaction() as tx:
             vast_schema = self._ensure_schema(tx)
             existing_tables = {t.name for t in vast_schema.tables()}
@@ -279,7 +311,8 @@ class VastDBStore(ColumnarStore):
 
         if table not in self._table_meta:
             raise RuntimeError(
-                f"Table '{table}' not registered. Call create_table() first."
+                f"Table '{table}' is not registered with this store instance. "
+                f"Call register_table() first, or create_table() to also create it."
             )
 
         schema, partition_by = self._table_meta[table]

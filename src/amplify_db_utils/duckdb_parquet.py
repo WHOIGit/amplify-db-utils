@@ -177,12 +177,12 @@ class DuckDBParquetStore(ColumnarStore):
     # Public API
     # ------------------------------------------------------------------
 
-    def create_table(
+    def _prepare_schema(
         self,
-        table: str,
         schema: type[BaseModel] | pa.Schema,
-        partition_by: list[str] | None = None,
-    ) -> None:
+        partition_by: list[str] | None,
+    ) -> pa.Schema:
+        """Convert and validate a declared schema. Pure — no I/O, no mutation."""
         arrow_schema = to_arrow_schema(schema)
 
         # Validate that partition key fields exist in the schema
@@ -194,6 +194,36 @@ class DuckDBParquetStore(ColumnarStore):
                     f"Partition key field(s) {missing!r} are not present in the schema. "
                     f"Partition key fields must be included as ordinary columns."
                 )
+
+        return arrow_schema
+
+    def register_table(
+        self,
+        table: str,
+        schema: type[BaseModel] | pa.Schema,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        # In-memory only: register() updates this instance's registry but the
+        # save() that would write _registry/tables.json is deliberately omitted.
+        # That file is read-modify-written without locking, so writing it from
+        # several processes at once loses entries; only create_table does it.
+        #
+        # Usually a no-op in practice — __init__ already loaded the on-disk
+        # registry, so a table created earlier is present and register()
+        # returns False after validating compatibility.
+        self._registry.register(
+            table, self._prepare_schema(schema, partition_by), partition_by
+        )
+
+    def create_table(
+        self,
+        table: str,
+        schema: type[BaseModel] | pa.Schema,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        # Not concurrency-safe: the registry file is read-modify-written
+        # without locking. Single-process callers only — see register_table.
+        arrow_schema = self._prepare_schema(schema, partition_by)
 
         changed = self._registry.register(table, arrow_schema, partition_by)
         if changed:
@@ -215,7 +245,8 @@ class DuckDBParquetStore(ColumnarStore):
     ) -> None:
         if not self._registry.has_table(table):
             raise RuntimeError(
-                f"Table '{table}' is not registered. Call create_table() first."
+                f"Table '{table}' is not registered with this store instance. "
+                f"Call register_table() first, or create_table() to also create it."
             )
 
         schema, partition_by = self._registry.get(table)

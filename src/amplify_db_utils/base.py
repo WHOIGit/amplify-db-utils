@@ -26,10 +26,57 @@ class ColumnarStore(ABC):
     analytical reads against tabular data. Implementations include
     DuckDB+Parquet (portable, serverless) and VAST DB (production scale).
 
-    Tables must be registered via ``create_table()`` before use. Schemas
-    are defined as Pydantic models or PyArrow schemas. Partition key fields
-    are stored as ordinary data columns — no separate partition routing needed.
+    Tables must be known to the store before use. There are two ways to get
+    there, and the distinction matters for concurrent deployments:
+
+    - ``register_table()`` teaches *this instance* about a table. Pure
+      in-memory bookkeeping: no DDL, no network, no file writes. Safe to call
+      from any number of processes at once.
+    - ``create_table()`` is ``register_table()`` plus whatever storage-side
+      creation the backend needs. It is the only method that mutates shared
+      state, so it belongs in a single-process provisioning step — not in the
+      startup path of a multi-worker service.
+
+    Schemas are defined as Pydantic models or PyArrow schemas. Partition key
+    fields are stored as ordinary data columns — no separate partition routing
+    needed.
     """
+
+    @abstractmethod
+    def register_table(
+        self,
+        table: str,
+        schema: type[BaseModel] | pa.Schema,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        """Declare a table's schema to this store instance, without creating it.
+
+        Validates the schema and partition keys and records them locally so
+        that ``write()``, ``get_schema()`` and the read paths know the table's
+        shape. Performs no DDL, no network round-trip, and no file write, so
+        concurrent callers cannot race one another.
+
+        Use this at service startup, after the table has already been created
+        out of band by ``create_table()``. It does *not* check that the table
+        actually exists in the backing store — a write to a table that was
+        never created fails at write time.
+
+        Args:
+            table: Table name.
+            schema: Row schema as a Pydantic model class or PyArrow schema.
+                Partition key fields must be included as ordinary columns.
+            partition_by: Ordered list of column names that define the partition
+                structure, e.g. ``["instrument", "year", "month"]``.
+
+        Raises:
+            ValueError: If a partition key field is absent from the schema.
+                An implementation that already holds persisted metadata for the
+                table may also apply the ``create_table`` compatibility rules
+                and reject an incompatible re-declaration — DuckDB+Parquet
+                does, having loaded the registry at construction; VastDB does
+                not, since partition_by is not a VastDB concept and there is
+                nothing on the server to compare against.
+        """
 
     @abstractmethod
     def create_table(
@@ -38,13 +85,20 @@ class ColumnarStore(ABC):
         schema: type[BaseModel] | pa.Schema,
         partition_by: list[str] | None = None,
     ) -> None:
-        """Register a schema and partition key structure for a table.
+        """Register a table (see ``register_table``) and create it in the store.
 
-        Idempotent — safe to call at service startup. On subsequent calls,
-        performs a compatibility check:
+        Idempotent with respect to a *sequential* caller — safe to re-run. On
+        subsequent calls, performs a compatibility check:
         - Adding a nullable column is allowed.
         - Removing or renaming a column, changing a type, or changing
           ``partition_by`` raises ``ValueError``.
+
+        Not safe to call concurrently for the same table. Existence is checked
+        and then acted on in two steps, and no backend here offers an atomic
+        create-if-absent, so two callers can both observe an absent table and
+        both try to create it. Call this from one process — a CLI, a migration
+        step, a provisioning job — and have everything else use
+        ``register_table``.
 
         Args:
             table: Table name.
@@ -86,7 +140,8 @@ class ColumnarStore(ABC):
         Partition key fields must be present as data columns in each record.
 
         Args:
-            table: Table name (must have been registered via ``create_table``).
+            table: Table name (must have been declared on this instance via
+                ``register_table`` or ``create_table``).
             records: Records to write. Accepts ``list[dict]``, PyArrow ``Table``,
                 or pandas ``DataFrame``.
             overwrite: If False (default), append records to existing data.
@@ -94,7 +149,8 @@ class ColumnarStore(ABC):
                 the records, replace all existing rows in that partition.
 
         Raises:
-            RuntimeError: If ``create_table`` was never called for this table.
+            RuntimeError: If neither ``register_table`` nor ``create_table`` was
+                called for this table on this store instance.
             ValueError: On schema mismatch or missing partition key fields.
         """
 

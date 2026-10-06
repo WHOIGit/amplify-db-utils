@@ -105,12 +105,44 @@ class ImageRecord(BaseModel):
     year: int         # partition key
     month: int        # partition key
 
-# Idempotent — safe to call at service startup
+# Creates the table. Single-process only — see "Creating vs. declaring" below.
 store.create_table("images", ImageRecord, partition_by=["instrument", "year", "month"])
+
+# In a process that only reads and writes an already-created table — an API
+# worker, a batch job — declare it instead. No I/O, so it cannot race.
+store.register_table("images", ImageRecord, partition_by=["instrument", "year", "month"])
 
 # Inspect what was registered
 schema = store.get_schema("images")   # -> pa.Schema
 ```
+
+### Creating vs. declaring
+
+Every process must declare a table's schema before reading or writing it —
+schema and `partition_by` live in the store instance, not (or not entirely) in
+the backend. Only one process should *create* it.
+
+| | `register_table()` | `create_table()` |
+|---|---|---|
+| Records schema + partition keys on the instance | yes | yes |
+| Touches disk, S3, or the VAST DB server | no | yes |
+| Safe to call concurrently | yes | **no** |
+| Where it belongs | every process, at startup | one provisioning step |
+
+`create_table()` checks whether the table exists and then creates it, in two
+steps, and neither backend offers an atomic create-if-absent to close the gap.
+On DuckDB+Parquet the registry file is read-modify-written without locking; on
+VAST DB the SDK's `fail_if_exists` argument gates a client-side existence check
+before an unconditional create RPC, so the flag never reaches the server. Two
+processes can therefore both observe an absent table and both try to create it.
+
+Run `create_table()` from a CLI, migration, or provisioning job, and use
+`register_table()` everywhere else. A multi-worker service that calls
+`create_table()` in its startup path has a race proportional to its worker
+count.
+
+`register_table()` does not check that the table exists — a write to a table
+that was never created fails at write time.
 
 Supported field annotations:
 
@@ -253,6 +285,9 @@ workloads.
 **Schema evolution.** Adding a nullable column is allowed; `create_table` on an existing table
 performs a compatibility check and updates the registry. Removing columns, changing types, or
 changing `partition_by` raise `ValueError`. The partition key structure is permanent at design time.
+`register_table` applies the same rules against the registry loaded at construction, but never
+writes it back — so a declaration that conflicts with the on-disk registry raises rather than
+silently diverging.
 
 ### Migrating a legacy registry
 
@@ -290,8 +325,13 @@ against either backend.
 if absent, creates the table if absent, and otherwise checks compatibility (no removed columns, no
 type changes, new columns must be nullable). Adding a new nullable column to an existing table is
 accepted by the check but not yet applied — `ALTER TABLE ADD COLUMN` is a TODO. `get_schema()` reads
-from a per-instance cache populated by `create_table()`, so call `create_table()` before using a
-table from a fresh process.
+from a per-instance cache, and nothing on the server can rebuild it (`partition_by` is not a VAST DB
+concept), so every fresh process must call `register_table()` — or `create_table()`, if it is the one
+process doing the creating — before using a table.
+
+Note that `register_table()` is *purely* a cache write here: unlike DuckDB+Parquet, which has an
+on-disk registry to compare against and applies the evolution rules, VAST DB has nothing local to
+check, so an incompatible re-declaration is accepted silently and only surfaces at write time.
 
 **Schema normalization.** VAST DB rejects `nullable=False` and does not carry timestamp time zones,
 so requested schemas are normalized on `create_table()`: every field becomes nullable, tz-aware

@@ -178,7 +178,8 @@ class SchemaRegistry:
         """
         if table not in self._tables:
             raise KeyError(
-                f"Table '{table}' is not registered. Call create_table() first."
+                f"Table '{table}' is not registered with this store instance. "
+                f"Call register_table() first, or create_table() to also create it."
             )
         entry = self._tables[table]
         return entry["schema"], entry["partition_by"]

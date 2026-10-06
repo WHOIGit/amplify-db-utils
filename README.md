@@ -166,6 +166,32 @@ n = store.count("images", filters={"instrument": "IFCB107"})
 partitions = store.distinct_values("images", ["instrument", "year", "month"])
 ```
 
+### Column projection
+
+`read()` and `bulk_read()` take an optional `columns` list. Both backends are columnar, so
+unprojected columns are never decoded or transferred — this is how you read two narrow columns
+from a table that also holds a wide one (an embedding vector, a JSON blob, a long text field)
+without paying for the wide one.
+
+```python
+ids = store.bulk_read(
+    "images",
+    filters={"instrument": "IFCB107", "year": 2024},
+    columns=["image_id", "timestamp"],
+)
+```
+
+- Columns come back in the order you listed them, not in registered-schema order.
+- Filter columns need not be projected — filtering on `year` while projecting only `image_id`
+  works.
+- Partition key columns are projectable, including projecting *only* partition columns.
+- `columns=None` is the default and returns every column, exactly as before.
+- `ValueError` is raised before any IO for an unknown column name, an empty list (`columns=[]`
+  is ambiguous), or a duplicated name.
+
+`read()` yields dicts whose keys are exactly the projected columns. `join()` does not yet accept a
+projection.
+
 ### Overwrite a partition
 
 Useful for idempotent batch re-runs. Replaces all rows for each distinct partition key combination

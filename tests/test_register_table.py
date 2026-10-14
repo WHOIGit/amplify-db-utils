@@ -86,6 +86,73 @@ def test_register_table_rejects_a_partition_key_absent_from_the_schema(tmp_path)
         store.register_table("images", ImageRecord, partition_by=["nonexistent"])
 
 
+def test_create_after_register_on_the_same_instance_still_persists(tmp_path):
+    """Regression: declaring then creating must still write the registry.
+
+    register_table adds to the in-memory registry, so a later create_table on
+    the same instance finds nothing to add. create_table used to treat that
+    "nothing changed" as "nothing to save" and skipped the write — leaving a
+    table that this process could use and no other process, or restart, could
+    see.
+    """
+    root = tmp_path / "store"
+    store = DuckDBParquetStore(DuckDBParquetConfig(root=str(root)))
+
+    store.register_table("images", ImageRecord, partition_by=PARTITION_BY)
+    store.create_table("images", ImageRecord, partition_by=PARTITION_BY)
+
+    assert (root / REGISTRY).exists(), (
+        "create_table after register_table skipped the registry write"
+    )
+
+    # The real test: a fresh process must see it.
+    reopened = DuckDBParquetStore(DuckDBParquetConfig(root=str(root)))
+    assert reopened.list_tables() == ["images"]
+    assert set(reopened.get_schema("images").names) == set(ImageRecord.model_fields)
+
+    reopened.write("images", [make_image()])
+    assert reopened.count("images") == 1
+
+
+def test_list_tables_is_empty_before_anything_is_created(tmp_path):
+    store = DuckDBParquetStore(DuckDBParquetConfig(root=str(tmp_path / "store")))
+    assert store.list_tables() == []
+
+
+def test_list_tables_reports_created_tables(tmp_path):
+    store = DuckDBParquetStore(DuckDBParquetConfig(root=str(tmp_path / "store")))
+    store.create_table("images", ImageRecord, partition_by=PARTITION_BY)
+    assert store.list_tables() == ["images"]
+
+
+def test_list_tables_ignores_merely_declared_tables(tmp_path):
+    """The whole point: it answers "what exists", not "what did I declare".
+
+    register_table adds to the in-memory registry without persisting it, so a
+    naive implementation that read self._registry would hand back whatever the
+    caller had just declared — and a startup check built on it would pass
+    even against a completely unprovisioned store.
+    """
+    store = DuckDBParquetStore(DuckDBParquetConfig(root=str(tmp_path / "store")))
+    store.register_table("images", ImageRecord, partition_by=PARTITION_BY)
+
+    assert store.list_tables() == [], (
+        "list_tables reported a table that was only declared, never created"
+    )
+
+
+def test_list_tables_sees_a_table_created_by_another_process(tmp_path):
+    """A worker must see what the provisioning step created."""
+    root = str(tmp_path / "store")
+
+    DuckDBParquetStore(DuckDBParquetConfig(root=root)).create_table(
+        "images", ImageRecord, partition_by=PARTITION_BY
+    )
+
+    worker = DuckDBParquetStore(DuckDBParquetConfig(root=root))
+    assert worker.list_tables() == ["images"]
+
+
 def test_register_table_applies_evolution_rules_against_the_on_disk_registry(tmp_path):
     """DuckDB has local metadata to compare against, so it validates.
 

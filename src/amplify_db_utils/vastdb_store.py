@@ -190,6 +190,19 @@ class VastDBStore(ColumnarStore):
         self._server_schema_cache[table] = schema
         return schema
 
+    def list_tables(self) -> list[str]:
+        """Return the tables that exist under this store's VastDB schema.
+
+        Read-only. An absent schema is reported as no tables rather than as
+        an error — "nothing provisioned yet" is the honest answer, and it is
+        what a caller checking for a missing table wants to hear.
+        """
+        with self._session.transaction() as tx:
+            bucket = tx.bucket(self._config.bucket)
+            if self._config.schema not in {s.name for s in bucket.schemas()}:
+                return []
+            return [t.name for t in bucket.schema(self._config.schema).tables()]
+
     def _schema_handle(self, tx):
         """Return the VastDB schema handle (bucket.schema) inside a tx.
 

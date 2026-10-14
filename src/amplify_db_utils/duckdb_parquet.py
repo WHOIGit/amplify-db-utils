@@ -230,9 +230,17 @@ class DuckDBParquetStore(ColumnarStore):
         # without locking. Single-process callers only — see register_table.
         arrow_schema = self._prepare_schema(schema, partition_by)
 
-        changed = self._registry.register(table, arrow_schema, partition_by)
-        if changed:
-            self._registry.save(self._fs, self._fs_root)
+        self._registry.register(table, arrow_schema, partition_by)
+
+        # Save unconditionally, ignoring register()'s "changed" return value.
+        # That flag reports whether the in-memory dict changed, which stopped
+        # being a proxy for "the file needs writing" once register_table began
+        # mutating the dict without persisting: register_table(t) followed by
+        # create_table(t) on the same instance leaves register() with nothing
+        # to add, so a conditional save would skip the write and the table
+        # would never reach disk. Rewriting an unchanged registry is cheap and
+        # this is a provisioning path, not a hot one.
+        self._registry.save(self._fs, self._fs_root)
 
     def get_schema(
         self,
@@ -241,6 +249,21 @@ class DuckDBParquetStore(ColumnarStore):
         """Return the registered schema for a table."""
         schema, _ = self._registry.get(table)
         return schema
+
+    def list_tables(self) -> list[str]:
+        """Return the tables recorded in the persisted schema registry.
+
+        Deliberately re-reads ``_registry/tables.json`` rather than reporting
+        ``self._registry``: register_table() adds to the in-memory registry
+        without persisting, so the live object conflates "declared here" with
+        "exists in the store" — and a caller asking what exists would get back
+        whatever it had just declared. Re-reading keeps this an honest
+        question about the backing store, matching VastDB's behaviour.
+
+        Read-only, so it is safe to call concurrently. An unprovisioned store
+        has no registry file, which loads as empty.
+        """
+        return SchemaRegistry.load(self._fs, self._fs_root).table_names()
 
     def write(
         self,

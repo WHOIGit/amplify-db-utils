@@ -142,7 +142,17 @@ Run `create_table()` from a CLI, migration, or provisioning job, and use
 count.
 
 `register_table()` does not check that the table exists — a write to a table
-that was never created fails at write time.
+that was never created fails at write time. Use `list_tables()` to check:
+
+```python
+missing = {"images", "provenance"} - set(store.list_tables())
+if missing:
+    raise RuntimeError(f"not provisioned: {sorted(missing)}")
+```
+
+`list_tables()` asks the backing store, so a table that was only declared does
+not appear. It is read-only and safe to call concurrently, which makes it the
+right way for a multi-worker service to fail fast at startup.
 
 Supported field annotations:
 

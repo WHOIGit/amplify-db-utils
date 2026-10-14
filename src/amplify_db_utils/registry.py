@@ -187,3 +187,7 @@ class SchemaRegistry:
     def has_table(self, table: str) -> bool:
         """Return True if the table has been registered."""
         return table in self._tables
+
+    def table_names(self) -> list[str]:
+        """Return every registered table name."""
+        return list(self._tables)

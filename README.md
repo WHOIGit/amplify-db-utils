@@ -22,7 +22,7 @@ pip install 'amplify-db-utils[pandas]'    # + pandas DataFrame support
 pip install 'amplify-db-utils[vastdb]'    # + VAST DB backend
 ```
 
-Requires Python 3.10+.
+Requires Python 3.11+.
 
 `VastDBConfig` / `VastDBStore` are only exported from `amplify_db_utils` when the `vastdb` extra is
 installed; importing them otherwise raises `ImportError`. Everything else works without it.

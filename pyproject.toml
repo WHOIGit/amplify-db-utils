@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "amplify-db-utils"
 version = "0.2.0"
 description = "Columnar database abstraction layer for AMPLIfy image service workflows"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.0",
     "pyarrow>=14.0",

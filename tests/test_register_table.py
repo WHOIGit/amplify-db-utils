@@ -114,6 +114,41 @@ def test_create_after_register_on_the_same_instance_still_persists(tmp_path):
     assert reopened.count("images") == 1
 
 
+def test_creating_one_table_does_not_persist_another_that_was_only_declared(tmp_path):
+    """
+
+    register_table and create_table share one in-memory registry, so a naive
+    save() dumps both — recording a table as provisioned when it was only
+    declared. A startup existence check built on list_tables would then
+    believe it, which is exactly the failure the check exists to catch.
+    """
+    root = tmp_path / "store"
+    store = DuckDBParquetStore(DuckDBParquetConfig(root=str(root)))
+
+    store.register_table("declared_only", ImageRecord, partition_by=PARTITION_BY)
+    store.create_table("created", ImageRecord, partition_by=PARTITION_BY)
+
+    reopened = DuckDBParquetStore(DuckDBParquetConfig(root=str(root)))
+    assert reopened.list_tables() == ["created"], (
+        "a table that was only declared got persisted as if it existed"
+    )
+
+
+def test_creating_does_not_drop_tables_created_earlier(tmp_path):
+    """The converse: filtering the save must not lose existing entries."""
+    root = str(tmp_path / "store")
+
+    first = DuckDBParquetStore(DuckDBParquetConfig(root=root))
+    first.create_table("a", ImageRecord, partition_by=PARTITION_BY)
+
+    second = DuckDBParquetStore(DuckDBParquetConfig(root=root))
+    second.register_table("declared_only", ImageRecord, partition_by=PARTITION_BY)
+    second.create_table("b", ImageRecord, partition_by=PARTITION_BY)
+
+    reopened = DuckDBParquetStore(DuckDBParquetConfig(root=root))
+    assert sorted(reopened.list_tables()) == ["a", "b"]
+
+
 def test_list_tables_is_empty_before_anything_is_created(tmp_path):
     store = DuckDBParquetStore(DuckDBParquetConfig(root=str(tmp_path / "store")))
     assert store.list_tables() == []

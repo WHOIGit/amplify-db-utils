@@ -67,10 +67,26 @@ class SchemaRegistry:
             pass  # Empty registry — first use
         return registry
 
-    def save(self, fs: pa_fs.FileSystem, fs_root: str) -> None:
-        """Persist registry to ``{fs_root}/_registry/tables.json``."""
+    def save(
+        self,
+        fs: pa_fs.FileSystem,
+        fs_root: str,
+        only: set[str] | None = None,
+    ) -> None:
+        """Persist registry to ``{fs_root}/_registry/tables.json``.
+
+        Args:
+            only: When given, write just these tables. The in-memory registry
+                can hold entries that were merely declared and never created
+                (see DuckDBParquetStore.register_table) — writing those would
+                record a table as provisioned when it does not exist. Callers
+                that mix declaring and creating on one instance must pass the
+                set they actually created. None writes everything.
+        """
         data = {}
         for table_name, entry in self._tables.items():
+            if only is not None and table_name not in only:
+                continue
             schema: pa.Schema = entry["schema"]
             data[table_name] = {
                 # schema_ipc is the only authoritative representation on load.

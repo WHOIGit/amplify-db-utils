@@ -109,6 +109,14 @@ class DuckDBParquetStore(ColumnarStore):
 
         self._registry = SchemaRegistry.load(self._fs, self._fs_root)
 
+        # Which of the registry's entries actually exist in the store. The
+        # registry itself cannot tell you: register_table() adds to it without
+        # creating anything, so it holds a mix of "exists" and "merely
+        # declared". Everything loaded from disk exists by definition;
+        # create_table() adds to this as it creates. save() is then given this
+        # set, so a declared-only table is never recorded as provisioned.
+        self._persisted: set[str] = set(self._registry.table_names())
+
     def _cursor(self) -> duckdb.DuckDBPyConnection:
         """Return a fresh cursor with LOCAL-scope settings applied.
 
@@ -209,9 +217,11 @@ class DuckDBParquetStore(ColumnarStore):
         partition_by: list[str] | None = None,
     ) -> None:
         # In-memory only: register() updates this instance's registry but the
-        # save() that would write _registry/tables.json is deliberately omitted.
-        # That file is read-modify-written without locking, so writing it from
-        # several processes at once loses entries; only create_table does it.
+        # save() that would write _registry/tables.json is deliberately
+        # omitted, and the table is not added to _persisted. That file is
+        # read-modify-written without locking, so writing it from several
+        # processes at once loses entries; only create_table does it, and only
+        # for tables it actually created.
         #
         # Usually a no-op in practice — __init__ already loaded the on-disk
         # registry, so a table created earlier is present and register()
@@ -231,16 +241,18 @@ class DuckDBParquetStore(ColumnarStore):
         arrow_schema = self._prepare_schema(schema, partition_by)
 
         self._registry.register(table, arrow_schema, partition_by)
+        self._persisted.add(table)
 
-        # Save unconditionally, ignoring register()'s "changed" return value.
-        # That flag reports whether the in-memory dict changed, which stopped
-        # being a proxy for "the file needs writing" once register_table began
-        # mutating the dict without persisting: register_table(t) followed by
-        # create_table(t) on the same instance leaves register() with nothing
-        # to add, so a conditional save would skip the write and the table
-        # would never reach disk. Rewriting an unchanged registry is cheap and
-        # this is a provisioning path, not a hot one.
-        self._registry.save(self._fs, self._fs_root)
+        # Save unconditionally, ignoring register()'s "changed" return value:
+        # that flag reports whether the in-memory dict changed, and
+        # register_table() may already have added this table, leaving nothing
+        # to change and a conditional save skipping the write entirely.
+        #
+        # Pass _persisted so only tables that exist are written. The registry
+        # also holds declared-only entries, and persisting one would record a
+        # table as provisioned when it does not exist — which a startup
+        # existence check would then believe.
+        self._registry.save(self._fs, self._fs_root, only=self._persisted)
 
     def get_schema(
         self,

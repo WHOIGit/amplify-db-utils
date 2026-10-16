@@ -202,3 +202,51 @@ def test_register_table_applies_evolution_rules_against_the_on_disk_registry(tmp
     worker = DuckDBParquetStore(DuckDBParquetConfig(root=root))
     with pytest.raises(ValueError, match="partition_by"):
         worker.register_table("images", ImageRecord, partition_by=["instrument"])
+
+
+def _registry_columns(root: str, table: str) -> list[str]:
+    """Column names recorded on disk, via a fresh instance."""
+    return [
+        f.name
+        for f in DuckDBParquetStore(DuckDBParquetConfig(root=root)).get_schema(table)
+    ]
+
+
+def test_declared_evolution_does_not_leak_into_the_registry_via_create_table(tmp_path):
+    """A schema evolved by register_table stays in memory, even across a later save.
+
+    Regression: register_table used to mutate the registry that create_table
+    later saved, so declaring an extra nullable column on one table wrote it to
+    disk when any other table was created on the same instance.
+    """
+    import pyarrow as pa
+
+    root = str(tmp_path / "store")
+    DuckDBParquetStore(DuckDBParquetConfig(root=root)).create_table(
+        "a", pa.schema([("x", pa.int64())])
+    )
+
+    worker = DuckDBParquetStore(DuckDBParquetConfig(root=root))
+    worker.register_table("a", pa.schema([("x", pa.int64()), ("y", pa.string())]))
+    assert [f.name for f in worker.get_schema("a")] == ["x", "y"]  # declared locally
+
+    worker.create_table("b", pa.schema([("z", pa.int64())]))
+
+    assert _registry_columns(root, "a") == ["x"]
+
+
+def test_create_table_keeps_tables_created_by_another_instance_since_construction(
+    tmp_path,
+):
+    """create_table re-reads the registry, so a stale snapshot cannot drop entries."""
+    import pyarrow as pa
+
+    root = str(tmp_path / "store")
+    cfg = DuckDBParquetConfig(root=root)
+    stale = DuckDBParquetStore(cfg)  # snapshot taken before anything exists
+    other = DuckDBParquetStore(cfg)
+
+    other.create_table("c", pa.schema([("q", pa.int64())]))
+    stale.create_table("e", pa.schema([("q", pa.int64())]))
+
+    assert sorted(DuckDBParquetStore(cfg).list_tables()) == ["c", "e"]

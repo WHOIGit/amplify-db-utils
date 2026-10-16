@@ -91,13 +91,13 @@ class SchemaRegistry:
         with fs.open_output_stream(registry_path) as f:
             f.write(json.dumps(data, indent=2).encode("utf-8"))
 
-    def register(
+    def check_compat(
         self,
         table: str,
         schema: pa.Schema,
         partition_by: list[str] | None,
     ) -> bool:
-        """Register or update a table entry after compatibility check.
+        """Check a declaration against the entry for ``table``, without mutating.
 
         Args:
             table: Table name.
@@ -105,13 +105,13 @@ class SchemaRegistry:
             partition_by: Partition key field names, or None.
 
         Returns:
-            True if the registry was modified (new table or new column added).
+            True if registering would modify the registry (new table or new
+            column added), False if the declaration matches the existing entry.
 
         Raises:
             ValueError: For any breaking schema or partition_by change.
         """
         if table not in self._tables:
-            self._tables[table] = {"schema": schema, "partition_by": partition_by}
             return True
 
         existing = self._tables[table]
@@ -164,11 +164,24 @@ class SchemaRegistry:
                 f"non-nullable new columns would violate schema on read."
             )
 
-        if added:
-            self._tables[table] = {"schema": schema, "partition_by": partition_by}
-            return True
+        return bool(added)
 
-        return False  # No changes
+    def register(
+        self,
+        table: str,
+        schema: pa.Schema,
+        partition_by: list[str] | None,
+    ) -> bool:
+        """Register or update a table entry after compatibility check.
+
+        Returns True if the registry was modified (new table or new column
+        added). Raises ValueError for any breaking change; see
+        ``check_compat``.
+        """
+        changed = self.check_compat(table, schema, partition_by)
+        if changed:
+            self._tables[table] = {"schema": schema, "partition_by": partition_by}
+        return changed
 
     def get(self, table: str) -> tuple[pa.Schema, list[str] | None]:
         """Retrieve registered schema and partition_by for a table.
@@ -178,7 +191,8 @@ class SchemaRegistry:
         """
         if table not in self._tables:
             raise KeyError(
-                f"Table '{table}' is not registered. Call create_table() first."
+                f"Table '{table}' is not registered with this store instance. "
+                f"Call register_table() first, or create_table() to also create it."
             )
         entry = self._tables[table]
         return entry["schema"], entry["partition_by"]
@@ -186,3 +200,7 @@ class SchemaRegistry:
     def has_table(self, table: str) -> bool:
         """Return True if the table has been registered."""
         return table in self._tables
+
+    def table_names(self) -> list[str]:
+        """Return every registered table name."""
+        return list(self._tables)

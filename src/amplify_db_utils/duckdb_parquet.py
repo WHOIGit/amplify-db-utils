@@ -107,7 +107,30 @@ class DuckDBParquetStore(ColumnarStore):
             for stmt in self._local_settings:
                 self._conn.execute(stmt)
 
+        # Two pieces of state, kept apart on purpose:
+        #   _registry    mirrors _registry/tables.json: tables that exist in the
+        #                store. Only create_table() mutates or saves it.
+        #   _table_meta  what *this instance* knows how to read and write:
+        #                seeded from the registry, extended by register_table()
+        #                and create_table(). Never written anywhere.
         self._registry = SchemaRegistry.load(self._fs, self._fs_root)
+        self._table_meta: dict[str, tuple[pa.Schema, list[str] | None]] = {
+            name: self._registry.get(name) for name in self._registry.table_names()
+        }
+
+    def _meta(self, table: str) -> tuple[pa.Schema, list[str] | None]:
+        """Return (schema, partition_by) declared on this instance.
+
+        Raises:
+            KeyError: If the table was not declared on this instance.
+        """
+        try:
+            return self._table_meta[table]
+        except KeyError:
+            raise KeyError(
+                f"Table '{table}' is not registered with this store instance. "
+                f"Call register_table() first, or create_table() to also create it."
+            ) from None
 
     def _cursor(self) -> duckdb.DuckDBPyConnection:
         """Return a fresh cursor with LOCAL-scope settings applied.
@@ -137,7 +160,7 @@ class DuckDBParquetStore(ColumnarStore):
 
     def _duckdb_partition_dir(self, table: str, partition_values: dict) -> str:
         """DuckDB-facing path for a specific Hive partition directory."""
-        _, partition_by = self._registry.get(table)
+        _, partition_by = self._meta(table)
         if not partition_by:
             return self._duckdb_table_root(table)
         parts = "/".join(f"{k}={partition_values[k]}" for k in partition_by)
@@ -145,7 +168,7 @@ class DuckDBParquetStore(ColumnarStore):
 
     def _fs_partition_dir(self, table: str, partition_values: dict) -> str:
         """PyArrow filesystem path for a specific Hive partition directory."""
-        _, partition_by = self._registry.get(table)
+        _, partition_by = self._meta(table)
         if not partition_by:
             return self._fs_table_root(table)
         parts = "/".join(f"{k}={partition_values[k]}" for k in partition_by)
@@ -159,7 +182,7 @@ class DuckDBParquetStore(ColumnarStore):
         relies on DuckDB's Hive partition pruning from the WHERE clause.
         """
         try:
-            _, partition_by = self._registry.get(table)
+            _, partition_by = self._meta(table)
         except KeyError:
             return f"{self._config.root}/{table}/**/*.parquet"
 
@@ -182,12 +205,12 @@ class DuckDBParquetStore(ColumnarStore):
     # Public API
     # ------------------------------------------------------------------
 
-    def create_table(
+    def _prepare_schema(
         self,
-        table: str,
         schema: type[BaseModel] | pa.Schema,
-        partition_by: list[str] | None = None,
-    ) -> None:
+        partition_by: list[str] | None,
+    ) -> pa.Schema:
+        """Convert and validate a declared schema. Pure — no I/O, no mutation."""
         arrow_schema = to_arrow_schema(schema)
 
         # Validate that partition key fields exist in the schema
@@ -200,17 +223,66 @@ class DuckDBParquetStore(ColumnarStore):
                     f"Partition key fields must be included as ordinary columns."
                 )
 
-        changed = self._registry.register(table, arrow_schema, partition_by)
-        if changed:
-            self._registry.save(self._fs, self._fs_root)
+        return arrow_schema
+
+    def register_table(
+        self,
+        table: str,
+        schema: type[BaseModel] | pa.Schema,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        # Declares the table on this instance only: no write, and _registry is
+        # untouched, so nothing here can reach disk. If the table is already in
+        # the on-disk registry (loaded at construction), the declaration must
+        # be compatible with it and the registry's entry is kept as-is unless
+        # the declaration adds nullable columns.
+        arrow_schema = self._prepare_schema(schema, partition_by)
+        if self._registry.has_table(table) and not self._registry.check_compat(
+            table, arrow_schema, partition_by
+        ):
+            self._table_meta[table] = self._registry.get(table)
+        else:
+            self._table_meta[table] = (arrow_schema, partition_by)
+
+    def create_table(
+        self,
+        table: str,
+        schema: type[BaseModel] | pa.Schema,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        # Not concurrency-safe: tables.json is read-modify-written without
+        # locking. Single-process callers only — see register_table.
+        arrow_schema = self._prepare_schema(schema, partition_by)
+
+        # Re-read right before modifying, so entries another process created
+        # since __init__ are not dropped by the save below. Narrows the race
+        # to this read-modify-write; it is not a lock.
+        self._registry = SchemaRegistry.load(self._fs, self._fs_root)
+        self._registry.register(table, arrow_schema, partition_by)
+        self._registry.save(self._fs, self._fs_root)
+        self._table_meta[table] = self._registry.get(table)
 
     def get_schema(
         self,
         table: str,
     ) -> pa.Schema:
         """Return the registered schema for a table."""
-        schema, _ = self._registry.get(table)
+        schema, _ = self._meta(table)
         return schema
+
+    def list_tables(self) -> list[str]:
+        """Return the tables recorded in the persisted schema registry.
+
+        Re-reads ``_registry/tables.json`` rather than using ``self._registry``,
+        so tables created by other processes since construction are included.
+        Declared-only tables (``register_table``) never appear. Note this
+        reflects the registry, not the Parquet files: a table whose files were
+        deleted out of band still shows up.
+
+        Read-only, so it is safe to call concurrently. An unprovisioned store
+        has no registry file, which loads as empty.
+        """
+        return SchemaRegistry.load(self._fs, self._fs_root).table_names()
 
     def write(
         self,
@@ -218,12 +290,13 @@ class DuckDBParquetStore(ColumnarStore):
         records: list[dict] | pa.Table,
         overwrite: bool = False,
     ) -> None:
-        if not self._registry.has_table(table):
+        if table not in self._table_meta:
             raise RuntimeError(
-                f"Table '{table}' is not registered. Call create_table() first."
+                f"Table '{table}' is not registered with this store instance. "
+                f"Call register_table() first, or create_table() to also create it."
             )
 
-        schema, partition_by = self._registry.get(table)
+        schema, partition_by = self._meta(table)
 
         # Normalize and validate input
         arrow_table = validate_records(records, schema)
@@ -316,7 +389,7 @@ class DuckDBParquetStore(ColumnarStore):
         """
         if columns is None:
             return "*", None
-        schema, _ = self._registry.get(table)
+        schema, _ = self._meta(table)
         columns = validate_projection(columns, schema)
         return ", ".join(f'"{c}"' for c in columns), columns
 
@@ -422,7 +495,7 @@ class DuckDBParquetStore(ColumnarStore):
             # No Parquet files — return empty table with registered schema,
             # narrowed to the projection so callers can concatenate results
             # without hitting a schema mismatch.
-            schema, _ = self._registry.get(table)
+            schema, _ = self._meta(table)
             if projected is not None:
                 schema = pa.schema([schema.field(c) for c in projected])
             return schema.empty_table()
@@ -435,7 +508,7 @@ class DuckDBParquetStore(ColumnarStore):
         fields: list[str],
         filters: Filters | None = None,
     ) -> list[dict]:
-        schema, partition_by = self._registry.get(table)
+        schema, partition_by = self._meta(table)
 
         # Path A: Hive directory introspection when fields == partition_by and no filters
         if (

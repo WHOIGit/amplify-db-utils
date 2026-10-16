@@ -40,6 +40,9 @@ class ColumnarStore(ABC):
     Schemas are defined as Pydantic models or PyArrow schemas. Partition key
     fields are stored as ordinary data columns — no separate partition routing
     needed.
+
+    Subclasses must implement both ``register_table()`` and ``list_tables()``
+    (abstract since 0.2.0); a subclass missing either cannot be instantiated.
     """
 
     @abstractmethod

@@ -81,6 +81,12 @@ def ingest(store: ColumnarStore, records: list[dict]) -> None:
     store.write("images", records)
 ```
 
+**Upgrading to 0.2.0 (subclassers only).** `register_table()` and `list_tables()` are both new
+abstract methods on `ColumnarStore`, so a subclass that does not implement them can no longer be
+instantiated. This affects custom backends and test doubles; code that only uses `DuckDBParquetStore`
+or `VastDBStore` is unaffected. See [Creating vs. declaring](#creating-vs-declaring) for the
+semantics each must provide.
+
 ---
 
 ## Examples

@@ -348,8 +348,10 @@ concept), so every fresh process must call `register_table()` — or `create_tab
 process doing the creating — before using a table.
 
 Note that `register_table()` is *purely* a cache write here: unlike DuckDB+Parquet, which has an
-on-disk registry to compare against and applies the evolution rules, VAST DB has nothing local to
-check, so an incompatible re-declaration is accepted silently and only surfaces at write time.
+on-disk registry to compare against, VAST DB has nothing shared to check. It does apply the evolution
+rules (and the immutable `partition_by` rule) against an earlier declaration of the same table on the
+same instance, so a conflicting re-declaration raises `ValueError`. A conflict with another process's
+declaration, or with the table on the server, is accepted and only surfaces at write time.
 
 **Schema normalization.** VAST DB rejects `nullable=False` and does not carry timestamp time zones,
 so requested schemas are normalized on `create_table()`: every field becomes nullable, tz-aware

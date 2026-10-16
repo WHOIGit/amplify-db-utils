@@ -73,12 +73,14 @@ class ColumnarStore(ABC):
 
         Raises:
             ValueError: If a partition key field is absent from the schema.
-                An implementation that already holds persisted metadata for the
-                table may also apply the ``create_table`` compatibility rules
-                and reject an incompatible re-declaration — DuckDB+Parquet
-                does, having loaded the registry at construction; VastDB does
-                not, since partition_by is not a VastDB concept and there is
-                nothing on the server to compare against.
+                An implementation that already holds metadata for the table may
+                also apply the ``create_table`` compatibility rules and reject
+                an incompatible re-declaration. DuckDB+Parquet compares against
+                the registry loaded at construction. VastDB compares only
+                against an earlier declaration on the same instance: partition_by
+                is not a VastDB concept and there is nothing on the server to
+                compare against, so a conflict with other processes or with the
+                server surfaces at write time.
         """
 
     @abstractmethod

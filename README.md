@@ -156,8 +156,10 @@ if missing:
     raise RuntimeError(f"not provisioned: {sorted(missing)}")
 ```
 
-`list_tables()` asks the backing store, so a table that was only declared does
-not appear. It is read-only and safe to call concurrently, which makes it the
+`list_tables()` asks shared storage, so a table that was only declared does
+not appear. On VAST DB it lists the tables on the server; on DuckDB+Parquet it
+lists the persisted schema registry, so a table whose Parquet files were
+deleted out of band still shows up. It is read-only and safe to call concurrently, which makes it the
 right way for a multi-worker service to fail fast at startup.
 
 Supported field annotations:

@@ -132,12 +132,17 @@ class ColumnarStore(ABC):
 
     @abstractmethod
     def list_tables(self) -> list[str]:
-        """Return the names of tables that exist in the backing store.
+        """Return the names of tables that have been created in the store.
 
-        Asks the backing store, not this instance's metadata: a table
-        declared with ``register_table`` but never created does not appear.
-        That is the point — it lets a caller check that provisioning actually
-        ran before it starts serving.
+        Asks shared storage, not this instance's metadata: a table declared
+        with ``register_table`` but never created does not appear. That is the
+        point — it lets a caller check that provisioning actually ran before it
+        starts serving.
+
+        What counts as "created" is backend-specific. VastDB lists the tables
+        on the server. DuckDB+Parquet lists the entries in the persisted schema
+        registry, so a table whose Parquet files were deleted out of band still
+        appears.
 
         Read-only, so unlike ``create_table`` it is safe to call concurrently.
         Returns an empty list when the store has never been provisioned.

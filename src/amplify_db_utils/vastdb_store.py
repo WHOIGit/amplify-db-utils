@@ -263,10 +263,26 @@ class VastDBStore(ColumnarStore):
         # since partition_by is not a VastDB concept. Every process that reads
         # or writes must therefore declare its tables, but declaring is free
         # and cannot race.
-        self._table_meta[table] = (
-            self._prepare_schema(schema, partition_by),
-            partition_by,
-        )
+        #
+        # The only thing to compare against is an earlier declaration on this
+        # same instance, so a conflicting re-declaration (e.g. a typo'd
+        # partition_by) raises here instead of silently replacing it. Nothing
+        # catches a conflict with what other processes declared or what is on
+        # the server; that only surfaces at write time.
+        arrow_schema = self._prepare_schema(schema, partition_by)
+
+        previous = self._table_meta.get(table)
+        if previous is not None:
+            prev_schema, prev_partition_by = previous
+            if list(partition_by or []) != list(prev_partition_by or []):
+                raise ValueError(
+                    f"Cannot change partition_by for table '{table}': "
+                    f"existing={list(prev_partition_by or [])!r}, "
+                    f"requested={list(partition_by or [])!r}."
+                )
+            self._check_schema_compat(table, prev_schema, arrow_schema, partition_by)
+
+        self._table_meta[table] = (arrow_schema, partition_by)
 
     def create_table(
         self,

@@ -647,7 +647,7 @@ def dedup_by_written_at(
     partition_expr = ", ".join(f'"{c}"' for c in key_columns)
 
     conn = duckdb.connect(":memory:")
-    result = conn.execute(f"""
+    result = conn.sql(f"""
         WITH ranked AS (
             SELECT *,
                 ROW_NUMBER() OVER (
@@ -659,9 +659,6 @@ def dedup_by_written_at(
         SELECT * EXCLUDE (_rn)
         FROM ranked
         WHERE _rn = 1
-    """).arrow()
+    """).to_arrow_table()
     conn.close()
-
-    if not isinstance(result, pa.Table):
-        result = result.read_all()
     return result

@@ -16,6 +16,12 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # "floor" is the oldest duckdb the package declares support for;
+        # "latest" is whatever PyPI resolves, so a breaking release shows up
+        # here before it reaches users.
+        duckdb: [floor, latest]
+
+    name: pytest (${{ matrix.python-version }}, duckdb ${{ matrix.duckdb }})
 
     steps:
       - uses: actions/checkout@v4
@@ -30,8 +36,18 @@ jobs:
         with:
           enable-cache: true
 
+      # [vastdb] is installed so the dedup_by_written_at tests, which import
+      # vastdb_store, run instead of skipping.
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        run: |
+          if [ "${{ matrix.duckdb }}" = "floor" ]; then
+            uv pip install --system -e ".[dev,vastdb]" "duckdb==1.5.0"
+          else
+            uv pip install --system -e ".[dev,vastdb]" --upgrade-package duckdb
+          fi
+
+      - name: Show duckdb version
+        run: python -c "import duckdb; print(duckdb.__version__)"
 
       # tests/smoke needs a live VAST DB and skips itself when VASTDB_ENDPOINT
       # is unset, so it is collected but does not run here.

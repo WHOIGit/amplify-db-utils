@@ -486,11 +486,7 @@ class DuckDBParquetStore(ColumnarStore):
         )
         cursor = self._cursor()
         try:
-            result = cursor.execute(sql, params).arrow()
-            # In DuckDB >= 1.1, .arrow() may return a RecordBatchReader
-            if not isinstance(result, pa.Table):
-                result = result.read_all()
-            return result
+            return cursor.sql(sql, params=params).to_arrow_table()
         except duckdb.IOException:
             # No Parquet files — return empty table with registered schema,
             # narrowed to the projection so callers can concatenate results
